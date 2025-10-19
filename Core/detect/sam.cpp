@@ -58,7 +58,7 @@ std::vector<cv::Mat> SamSegmenter::inferFromDetections(cv::Mat& image,
             cv::Point(static_cast<int>(box.right), static_cast<int>(box.bottom))
         };
 
-        // 标签：2 -> 框左上角；3 -> 框右下角（参考项目 main.cpp 中用法）
+        // 标签：2 -> 框左上角；3 -> 框右下角
         std::vector<float> labels = {2.0f, 3.0f};
 
         // 使用 SpeedSam 进行推理

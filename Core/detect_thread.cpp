@@ -216,10 +216,9 @@ void DetectThread::run() {
                 minDiamPx = static_cast<float>(mParams.min_diameter_mm / pix_to_mm);
             }
             // 执行分割与筛选
-            mSam->inferFromDetections(vis_cpu, detres, minAreaPx, minDiamPx);
+            auto masks = mSam->inferFromDetections(vis_cpu, detres, minAreaPx, minDiamPx);
 
-            // 获取掩码并可视化
-            auto masks = mSam->getCurrentMasks();
+            
             cv::Mat seg_vis = mSam->visualize(d_cropped, detres, masks, false);
             to_save = seg_vis.empty() ? vis_cpu : seg_vis;
         } else {
