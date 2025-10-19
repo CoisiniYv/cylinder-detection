@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "HalconCpp.h"
 #include "HDevThread.h"
@@ -107,9 +107,10 @@ private:
     // 生成临时文件名（包含时间戳 + 组ID + 图片ID）
     std::string generateTempFilename(std::uint64_t group_id, int image_id) const;
 
-    // 生成指定路径的文件名
+    // 生成指定路径的文件名（保存到 savePath/uuid/ 目录，命名为 skeleton_i<image_id>.png）
     std::string generateSavePathFilename(const std::string& savePath,
-        const std::string& uuid) const;
+        const std::string& uuid,
+        int image_id) const;
 
     // 开发模式设置
     void dev_update_off();

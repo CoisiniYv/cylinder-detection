@@ -1,7 +1,7 @@
 ﻿#include <memory>
 #include <vector>
 #include <atomic>
-
+#include "sqlite_helper.hpp"
 #include "Server.hpp"           // DetectParams / g_server_state (optional)
 #include "queue_manager.hpp"    // g_queue_manager
 #include "camera_thread.hpp"

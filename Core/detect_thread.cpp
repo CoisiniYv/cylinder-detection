@@ -151,14 +151,17 @@ void DetectThread::run() {
         std::vector<std::pair<double,double>> centers;
         bool halcon_ok = false;
         try {
-            // halcon_ok = mHalcon.processImage(d_cropped, outputImagePath, centers, false);
+            // 读取上传目录（config.json -> uploadDir），目录规则：uploadDir/run_YYYYMMDD_HHMMSS_groupid
+            extern ServerState g_server_state;
+            const std::string savePath = (g_server_state.config ? g_server_state.config->outputdir : std::string());
+            const std::string uuid = std::string("run_") + g_server_state.run_id + "_" + std::to_string(frame.meta.group_id);
             halcon_ok = mHalcon.processImage(
                 d_cropped,
                 outputImagePath,
                 centers,
-                false,
-                std::string(""),
-                std::string(""),
+                /*enableSaveToPath*/ !savePath.empty(),
+                /*uuid*/ uuid,
+                /*savePath*/ savePath,
                 frame.meta.group_id,
                 frame.meta.index_in_group
             );
@@ -166,6 +169,7 @@ void DetectThread::run() {
             std::cerr << "HalconProcessor error: " << e.what() << std::endl;
             halcon_ok = false;
         }
+
         // mHalcon.cleanupTempFiles();
         if (!halcon_ok || centers.empty()) {
             // 构造空结果并入队（可选）。这里选择跳过。
@@ -200,6 +204,8 @@ void DetectThread::run() {
         // 使用 SAM 进行分割并可视化；如 SAM 未就绪则回退到 YOLO 可视化
         cv::Mat to_save;
         // SAM 分割（若已成功初始化）
+        std::vector<double> areas_px; // 与 detres 对齐的像素面积
+        std::vector<double> lengths_px; // 与 detres 对齐的像素“长度”（以最小外接圆直径近似）
         if (mSamReady && mSam) {
             // 将 mm 阈值转换为像素阈值：
             double pix_to_mm = mParams.pix_to_mm;
@@ -215,37 +221,63 @@ void DetectThread::run() {
             if (mParams.min_diameter_mm > 0.0) {
                 minDiamPx = static_cast<float>(mParams.min_diameter_mm / pix_to_mm);
             }
-            // 执行分割与筛选
+            // 执行分割与筛选（masks 与 detres 一一对应），并直接复用 SAM 已计算的面积/直径
             auto masks = mSam->inferFromDetections(vis_cpu, detres, minAreaPx, minDiamPx);
 
-            
-            cv::Mat seg_vis = mSam->visualize(d_cropped, detres, masks, false);
+            // 直接使用 SamSegmenter 的最近一次度量，避免二次计算
+            areas_px.assign(detres.num, 0.0);
+            lengths_px.assign(detres.num, 0.0);
+            const auto& samAreas = mSam->lastAreasPx();
+            const auto& samDiameters = mSam->lastDiametersPx();
+            for (int i = 0; i < detres.num; ++i) {
+                if (i < static_cast<int>(samAreas.size())) {
+                    areas_px[i] = samAreas[i];
+                }
+                if (i < static_cast<int>(samDiameters.size())) {
+                    lengths_px[i] = samDiameters[i];
+                }
+            }
+            // 保存 SAM 结果到 uploadDir/run_<run_id>_<group_id>/output_i<index>.png
+            extern ServerState g_server_state;
+            const std::string savePath = (g_server_state.config ? g_server_state.config->outputdir : std::string());
+            const std::string uuid = std::string("run_") + g_server_state.run_id + "_" + std::to_string(frame.meta.group_id);
+            cv::Mat seg_vis = mSam->visualize(d_cropped, detres, masks, !savePath.empty(), uuid, savePath, frame.meta.index_in_group);
             to_save = seg_vis.empty() ? vis_cpu : seg_vis;
         } else {
+            // 无 SAM 时，简单回退为 bbox 估计，确保字段有值
+            areas_px.assign(detres.num, 0.0);
+            lengths_px.assign(detres.num, 0.0);
+            for (int i = 0; i < detres.num; ++i) {
+                const auto& b = detres.boxes[i];
+                int w = static_cast<int>(b.right - b.left);
+                int h = static_cast<int>(b.bottom - b.top);
+                areas_px[i] = static_cast<double>(w) * static_cast<double>(h);
+                lengths_px[i] = static_cast<double>(std::max(w, h));
+            }
             trtyolo::SliceDetector::visualize_sliced_result(vis_cpu, detres, mParams.labels);
             to_save = vis_cpu;
         }
 
-        std::filesystem::path base(mParams.result_image_path.empty() ? std::filesystem::path("./output") : std::filesystem::path(mParams.result_image_path));
-        std::string save_path;
-        // 始终生成唯一文件名，避免覆盖
-        const auto ts = frame.meta.timestamp_ms ? frame.meta.timestamp_ms : (std::int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        const std::string stem = base.has_extension() ? base.stem().string() : std::string("det");
-        const std::string ext = base.has_extension() ? base.extension().string() : std::string(".png");
-        auto fname = stem + "_" + std::to_string(frame.meta.sequence_id) + "_" + std::to_string(mIndex) + "_" + std::to_string(ts) + ext;
-        if (base.has_extension()) {
-            ensure_dir(base.parent_path());
-            save_path = (base.parent_path() / fname).string();
-        } else {
-            ensure_dir(base);
-            save_path = (base / fname).string();
-        }
+        // 统一保存到 uploadDir/run_<run_id>_<group_id>/output_i<index>.png
+        extern ServerState g_server_state;
+        const std::string savePath = (g_server_state.config ? g_server_state.config->outputdir : std::string());
+        const std::string uuid = std::string("run_") + g_server_state.run_id + "_" + std::to_string(frame.meta.group_id);
+        std::filesystem::path out_dir = std::filesystem::path(savePath) / uuid;
+        ensure_dir(out_dir);
+        std::string save_path = (out_dir / (std::string("output_i") + std::to_string(frame.meta.index_in_group) + ".png")).string();
         cv::imwrite(save_path, to_save);
 
+        
         // 构造结果并入队
         SingleImageResult result;
         result.meta = frame.meta;
+        // 输出图保存路径：uploadDir/run_<run_id>_<group_id>/output_i<index>.png
         result.saved_path = save_path;
+        // Halcon 骨架图保存路径：uploadDir/run_<run_id>_<group_id>/skeleton_i<index>.png
+        if (!outputImagePath.empty()) {
+            result.skeleton_path = outputImagePath;
+        }
+
         result.detections.reserve(detres.num);
         for (int i = 0; i < detres.num; ++i) {
             Detection d;
@@ -261,6 +293,9 @@ void DetectThread::run() {
             } else {
                 d.label = std::string("class_") + std::to_string(d.label_id);
             }
+            // 写入与 SAM 掩码对齐的面积/长度（像素单位）
+            if (i < static_cast<int>(areas_px.size())) d.area = areas_px[i];
+            if (i < static_cast<int>(lengths_px.size())) d.length = lengths_px[i];
             result.detections.push_back(std::move(d));
         }
 

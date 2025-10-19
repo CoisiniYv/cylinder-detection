@@ -1,4 +1,4 @@
-#include "Config.hpp"
+﻿#include "Config.hpp"
 #include <fstream>
 #include <iostream>
 #include <filesystem>
@@ -27,6 +27,7 @@ namespace XL {
 
                 this->outputdir = root.get("uploadDir", "").asString();
                 this->modelDir = root.get("modelDir", "").asString();
+                this->dbPath   = root.get("dbPath", "").asString();
 
                 std::filesystem::path path(outputdir);
                 try {
@@ -57,5 +58,6 @@ namespace XL {
         printf("config.analyzerPort=%d\n", analyzerPort);
         printf("config.uploadDir=%s\n", outputdir.data());
         printf("config.modelDir=%s\n", modelDir.data());
+        printf("config.dbPath=%s\n", dbPath.empty() ? "(empty)" : dbPath.c_str());
     }
 }

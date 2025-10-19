@@ -1,7 +1,9 @@
 ﻿#include "Scheduler.hpp"
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <json/json.h>
+
 
 namespace XL {
 
@@ -27,7 +29,7 @@ static Json::Value single_result_to_json(const SingleImageResult& r) {
     j["meta"] = meta;
 
     j["saved_path"] = r.saved_path;
-    j["thumbnail_path"] = r.thumbnail_path;
+    j["skeleton_path"] = r.skeleton_path;
 
     Json::Value dets(Json::arrayValue);
     for (const auto& d : r.detections) dets.append(detection_to_json(d));
@@ -35,53 +37,123 @@ static Json::Value single_result_to_json(const SingleImageResult& r) {
     return j;
 }
 
-static bool save_group_json(const QuadFrameResult& qres, const std::string& device_id, const std::string& outdir) {
-    // 组状态：任一面有检测则视为 NG
-    bool ng = false;
-    for (int i = 0; i < static_cast<int>(kQuadImageCount); ++i) {
-        if (!qres.results[i].detections.empty()) { ng = true; break; }
+// ensure_db_initialized 已迁移到 Core/db_utils.hpp|cpp，Scheduler 不再负责数据库初始化。
+static void upsert_group(SQLiteHelper& db, const std::string& run_id, long long gid, const std::string& device_id, const std::string& status) {
+    // 查询是否存在当前 run 的该组记录
+    char buf[256];
+    snprintf(buf, sizeof(buf), "SELECT 1 FROM inspection_groups WHERE run_id='%s' AND group_id=%llu;", run_id.c_str(), (unsigned long long)gid);
+    auto rows = db.query(buf);
+    if (!rows.empty()) {
+        db.prepare("UPDATE inspection_groups SET device_id=?, status=?, updated_time=CURRENT_TIMESTAMP WHERE run_id=? AND group_id=?;");
+        db.bind(1, device_id);
+        db.bind(2, status);
+        db.bind(3, run_id);
+        db.bind(4, gid);
+        db.step();
+    } else {
+        db.prepare("INSERT INTO inspection_groups(run_id,group_id,device_id,status) VALUES(?,?,?,?);");
+        db.bind(1, run_id);
+        db.bind(2, gid);
+        db.bind(3, device_id);
+        db.bind(4, status);
+        db.step();
     }
+}
 
-    Json::Value root;
-    root["device_id"] = device_id;
-    // 取第0面或 source.group_id 作为组ID
-    std::uint64_t gid = qres.source.group_id ? qres.source.group_id : qres.results[0].meta.group_id;
-    root["group_id"] = static_cast<Json::UInt64>(gid);
-    root["status"] = ng ? "NG" : "GOOD";
+static long long upsert_face(SQLiteHelper& db, const std::string& run_id, long long gid, int face_index, const SingleImageResult& r) {
+    const std::string sk_path = r.skeleton_path.empty() ? r.saved_path : r.skeleton_path;
 
-    Json::Value faces(Json::arrayValue);
-    for (int i = 0; i < static_cast<int>(kQuadImageCount); ++i) {
-        faces.append(single_result_to_json(qres.results[i]));
+    // 查找当前 run + group + face_index 的 face_id
+    char qface[256];
+    snprintf(qface, sizeof(qface), "SELECT face_id FROM inspection_faces WHERE run_id='%s' AND group_id=%llu AND face_index=%d;",
+             run_id.c_str(), (unsigned long long)gid, face_index);
+    auto frows = db.query(qface);
+    long long face_id = 0;
+    if (!frows.empty()) {
+        face_id = std::stoll(frows[0][0]);
+        db.prepare("UPDATE inspection_faces SET timestamp_ms=?, sequence_id=?, saved_path=?, skeleton_path=? WHERE face_id=?;");
+        db.bind(1, static_cast<long long>(r.meta.timestamp_ms));
+        db.bind(2, static_cast<long long>(r.meta.sequence_id));
+        db.bind(3, r.saved_path);
+        db.bind(4, sk_path);
+        db.bind(5, face_id);
+        db.step();
+    } else {
+        db.prepare("INSERT INTO inspection_faces(run_id,group_id,face_index,timestamp_ms,sequence_id,saved_path,skeleton_path) VALUES(?,?,?,?,?,?,?);");
+        db.bind(1, run_id);
+        db.bind(2, gid);
+        db.bind(3, face_index);
+        db.bind(4, static_cast<long long>(r.meta.timestamp_ms));
+        db.bind(5, static_cast<long long>(r.meta.sequence_id));
+        db.bind(6, r.saved_path);
+        db.bind(7, sk_path);
+        db.step();
+        // 查回 face_id
+        auto f2 = db.query(qface);
+        if (!f2.empty()) face_id = std::stoll(f2[0][0]);
     }
-    root["faces"] = faces;
+    return face_id;
+}
 
-    // 文件名：device_group_timestamp.json
-    const auto ts = getCurTimestamp();
-    std::filesystem::path dir(outdir.empty() ? std::filesystem::path("./output") : std::filesystem::path(outdir));
-    std::error_code ec;
-    if (!std::filesystem::exists(dir)) {
-        std::filesystem::create_directories(dir, ec);
-        if (ec) {
-            LOGE("创建输出目录失败: %s", ec.message().c_str());
-            return false;
+static void replace_defects(SQLiteHelper& db, long long face_id, const std::vector<Detection>& dets) {
+    db.prepare("DELETE FROM defect_detections WHERE face_id=?;");
+    db.bind(1, face_id);
+    db.step();
+
+    for (const auto& d : dets) {
+        db.prepare("INSERT INTO defect_detections(face_id,label_id,label,confidence,bbox_x,bbox_y,bbox_w,bbox_h,length,area) VALUES(?,?,?,?,?,?,?,?,?,?);");
+        db.bind(1, face_id);
+        db.bind(2, d.label_id);
+        db.bind(3, d.label);
+        db.bind(4, static_cast<double>(d.confidence));
+        db.bind(5, static_cast<double>(d.box.x));
+        db.bind(6, static_cast<double>(d.box.y));
+        db.bind(7, static_cast<double>(d.box.w));
+        db.bind(8, static_cast<double>(d.box.h));
+        // 优先写入检测自带的真实长度/面积；如缺失则回退到 bbox 估计
+        double length = d.length > 0.0 ? d.length : std::max(static_cast<double>(d.box.w), static_cast<double>(d.box.h));
+        double area   = d.area   > 0.0 ? d.area   : static_cast<double>(d.box.w) * static_cast<double>(d.box.h);
+        db.bind(9, length);
+        db.bind(10, area);
+        db.step();
+    }
+}
+
+static bool save_group_db(const QuadFrameResult& qres, const std::string& run_id, const std::string& device_id, const std::string& dbfile) {
+    try {
+        SQLiteHelper db(dbfile);
+
+        // 计算组状态：任一面有检测则视为 NG
+        bool ng = false;
+        for (int i = 0; i < static_cast<int>(kQuadImageCount); ++i) {
+            if (!qres.results[i].detections.empty()) { ng = true; break; }
         }
-    }
-    char fname[256];
-    snprintf(fname, sizeof(fname), "%s_%llu_%lld.json", device_id.empty() ? "device" : device_id.c_str(), (unsigned long long)gid, (long long)ts);
-    std::filesystem::path outpath = dir / fname;
+        const std::string status = ng ? "NG" : "GOOD";
+        std::uint64_t gid_u64 = qres.source.group_id ? qres.source.group_id : qres.results[0].meta.group_id;
+        long long gid = static_cast<long long>(gid_u64);
 
-    Json::StreamWriterBuilder w;
-    w["indentation"] = "";
-    std::ofstream ofs(outpath.string(), std::ios::binary);
-    if (!ofs.is_open()) {
-        LOGE("写入 JSON 失败：%s", outpath.string().c_str());
+        db.begin();
+        upsert_group(db, run_id, gid, device_id, status);
+
+        // 写入四个面的记录与缺陷
+        for (int i = 0; i < static_cast<int>(kQuadImageCount); ++i) {
+            const auto& r = qres.results[i];
+            long long face_id = upsert_face(db, run_id, gid, i, r);
+            if (face_id <= 0) {
+                LOGE("写入面记录失败：run_id=%s, group=%llu, face_index=%d", run_id.c_str(), (unsigned long long)gid_u64, i);
+                db.rollback();
+                return false;
+            }
+            replace_defects(db, face_id, r.detections);
+        }
+
+        db.commit();
+        LOGI("组结果已写入数据库: run_id=%s, group_id=%llu, device=%s, status=%s", run_id.c_str(), (unsigned long long)gid_u64, device_id.c_str(), status.c_str());
+        return true;
+    } catch (const std::exception& e) {
+        LOGE("写入数据库异常: %s", e.what());
         return false;
     }
-    ofs << Json::writeString(w, root);
-    ofs.close();
-
-    LOGI("组结果已保存: %s", outpath.string().c_str());
-    return true;
 }
 
 Scheduler::Scheduler() {}
@@ -93,7 +165,6 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
         return false;
     }
 
-    // 保存参数（传递给工作线程）
     mParams = params;
 
     // 启动队列管理（唤醒阻塞）
@@ -117,21 +188,22 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
         mWorkers.emplace_back(std::move(worker));
     }
 
+    // 数据库路径来自配置，缺省为 my_inspection.db（初始化已在 main 完成）
+    extern ServerState g_server_state;
+    const std::string dbfile = (g_server_state.config && !g_server_state.config->dbPath.empty())
+        ? g_server_state.config->dbPath
+        : std::string("my_inspection.db");
+    const std::string run_id = g_server_state.run_id;
+
     // 创建并启动组管理线程
     mGroupMgr = std::make_unique<GroupManager>();
     mGroupMgr->setCameraThread(mCamera.get());
     mGroupMgr->setGroupTimeoutMs(mGroupTimeoutMs);
-    mGroupMgr->setOnGroupComplete([this](const QuadFrameResult& qres) {
-        // 保存到 JSON 文件（使用配置的 uploadDir 作为输出目录）
-        extern ServerState g_server_state;
-        std::string outdir;
-        if (g_server_state.config && !g_server_state.config->outputdir.empty()) {
-            outdir = g_server_state.config->outputdir;
-        } else {
-            outdir = "./output";
+    mGroupMgr->setOnGroupComplete([this, dbfile, run_id](const QuadFrameResult& qres) {
+        // 仅进行写入，初始化已在 main() 完成
+        if (!save_group_db(qres, run_id, mParams.device_id, dbfile)) {
+            LOGE("保存组结果到数据库失败");
         }
-        save_group_json(qres, mParams.device_id, outdir);
-        // TODO: 也可以在此处通过 HTTP 上报，若配置提供 reportUrl
     });
     mGroupMgr->start();
 

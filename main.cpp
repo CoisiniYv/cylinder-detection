@@ -1,62 +1,88 @@
-﻿#include <iostream>
+#include <iostream>
 #include <string>
 #include "Core/Server.hpp"
 #include "Core/Config.hpp"
+#include "Core/db_utils.hpp"
+#include <ctime>
+#include <sstream>
 //#include "Core/sqlite_helper.hpp"
 using namespace XL;
 
-//int main(int argc, char** argv) {
-//    try {
-//        const char* cfg_file = nullptr;
-//
-//        // 命令行参数：-h 打印帮助；-f 指定配置文件路径（默认使用当前目录下的 config.json）
-//        for (int i = 1; i < argc; i += 2) {
-//            if (argv[i][0] != '-') {
-//                printf("参数错误:%s\n", argv[i]);
-//                return -1;
-//            }
-//            switch (argv[i][1]) {
-//            case 'h': {
-//                printf("-h 打印参数帮助并退出\n");
-//                printf("-f 配置文件    如：-f config.json \n");
-//                return 0;
-//            }
-//            case 'f': {
-//                if (i + 1 < argc) cfg_file = argv[i + 1];
-//                break;
-//            }
-//            default: {
-//                printf("参数错误:%s\n", argv[i]);
-//                return -1;
-//            }
-//            }
-//        }
-//
-//        if (cfg_file == nullptr) {
-//            cfg_file = "config.json"; // 默认使用当前目录配置
-//        }
-//
-//        Config config(cfg_file);
-//        if (!config.mState) {
-//            printf("读取配置失败: %s\n", cfg_file);
-//            return -1;
-//        }
-//        config.show();
-//
-//        // 启动 HTTP Server（阻塞运行，接受 /api/control/add 与 /api/control/cancel 指令）
-//        Server server;
-//        server.start(&config);
-//        return 0;
-//    }
-//    catch (const std::exception& e) {
-//        std::cerr << "程序执行出错: " << e.what() << std::endl;
-//        return -1;
-//    }
-//    catch (...) {
-//        std::cerr << "程序执行出错: 未知异常" << std::endl;
-//        return -1;
-//    }
-//}
+int main(int argc, char** argv) {
+    try {
+        const char* cfg_file = nullptr;
+
+        // 命令行参数：-h 打印帮助；-f 指定配置文件路径（默认使用当前目录下的 config.json）
+        for (int i = 1; i < argc; i += 2) {
+            if (argv[i][0] != '-') {
+                printf("参数错误:%s\n", argv[i]);
+                return -1;
+            }
+            switch (argv[i][1]) {
+            case 'h': {
+                printf("-h 打印参数帮助并退出\n");
+                printf("-f 配置文件    如：-f config.json \n");
+                return 0;
+            }
+            case 'f': {
+                if (i + 1 < argc) cfg_file = argv[i + 1];
+                break;
+            }
+            default: {
+                printf("参数错误:%s\n", argv[i]);
+                return -1;
+            }
+            }
+        }
+
+        if (cfg_file == nullptr) {
+            cfg_file = "config.json"; // 默认使用当前目录配置
+        }
+
+        Config config(cfg_file);
+        if (!config.mState) {
+            printf("读取配置失败: %s\n", cfg_file);
+            return -1;
+        }
+        config.show();
+
+        // 数据库初始化（幂等）和本次运行批次注册
+        const std::string dbfile = (!config.dbPath.empty()) ? config.dbPath : std::string("my_inspection.db");
+        if (!XL::ensure_db_initialized(dbfile)) {
+            printf("数据库初始化失败: %s\n", dbfile.c_str());
+            return -1;
+        }
+        // 生成 run_id（如 run_YYYYMMDD_HHMMSS）
+        char timebuf[32];
+        std::time_t t = std::time(nullptr);
+        std::tm tm{};
+        localtime_s(&tm, &t);
+        std::snprintf(timebuf, sizeof(timebuf), "%04d%02d%02d_%02d%02d%02d",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec);
+        std::string run_id = std::string("run_") + timebuf;
+        if (!XL::register_run(dbfile, run_id)) {
+            printf("注册 run_id 失败: %s\n", run_id.c_str());
+            return -1;
+        }
+        // 写入到全局共享状态，供 Scheduler 使用
+        extern XL::ServerState g_server_state;
+        g_server_state.run_id = run_id;
+
+        // 启动 HTTP Server（阻塞运行，接受 /api/control/add 与 /api/control/cancel 指令）
+        Server server;
+        server.start(&config);
+        return 0;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "程序执行出错: " << e.what() << std::endl;
+        return -1;
+    }
+    catch (...) {
+        std::cerr << "程序执行出错: 未知异常" << std::endl;
+        return -1;
+    }
+}
 
 
 
@@ -261,101 +287,101 @@ using namespace XL;
 
 
 
-#include <sqlite3.h>
-#include <iostream>
-#include <string>
-
-static const char* ddl_inspection_groups = R"(
-CREATE TABLE IF NOT EXISTS inspection_groups (
-    group_id     INTEGER PRIMARY KEY,          -- 对应 MySQL BIGINT UNSIGNED PK
-    device_id    TEXT    NOT NULL,
-    status       TEXT    NOT NULL
-                 CHECK (status IN ('NG','GOOD')),
-    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_device_id     ON inspection_groups(device_id);
-CREATE INDEX IF NOT EXISTS idx_status        ON inspection_groups(status);
-CREATE INDEX IF NOT EXISTS idx_g_created_time ON inspection_groups(created_time);
-)";
-
-static const char* ddl_inspection_faces = R"(
-CREATE TABLE IF NOT EXISTS inspection_faces (
-    face_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id      INTEGER NOT NULL,
-    face_index    INTEGER NOT NULL CHECK (face_index BETWEEN 0 AND 3),
-    timestamp_ms  INTEGER NOT NULL,
-    sequence_id   INTEGER NOT NULL,
-    saved_path    TEXT    NOT NULL,
-    skeleton_path TEXT    NOT NULL,
-    created_time  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(group_id, face_index),
-    FOREIGN KEY (group_id) REFERENCES inspection_groups(group_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_group_id     ON inspection_faces(group_id);
-CREATE INDEX IF NOT EXISTS idx_timestamp_ms ON inspection_faces(timestamp_ms);
-CREATE INDEX IF NOT EXISTS idx_sequence_id  ON inspection_faces(sequence_id);
-)";
-
-static const char* ddl_defect_detections = R"(
-CREATE TABLE IF NOT EXISTS defect_detections (
-    detection_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    face_id      INTEGER NOT NULL,
-    label_id     INTEGER NOT NULL,
-    label        TEXT    NOT NULL,
-    confidence   REAL    NOT NULL,          -- 0.0-1.0
-    bbox_x       REAL    NOT NULL,
-    bbox_y       REAL    NOT NULL,
-    bbox_w       REAL    NOT NULL,
-    bbox_h       REAL    NOT NULL,
-    length       REAL    NOT NULL,
-    area         REAL    NOT NULL,
-    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (face_id) REFERENCES inspection_faces(face_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_face_id     ON defect_detections(face_id);
-CREATE INDEX IF NOT EXISTS idx_label_id    ON defect_detections(label_id);
-CREATE INDEX IF NOT EXISTS idx_confidence  ON defect_detections(confidence);
-)";
-
-bool execute_sql(sqlite3* db, const std::string& sql) {
-    char* err = nullptr;
-    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
-        std::cerr << "SQLite error: " << (err ? err : "unknown") << '\n';
-        sqlite3_free(err);
-        return false;
-    }
-    return true;
-}
-
-int main() {
-    sqlite3* db = nullptr;
-    if (sqlite3_open("my_inspection.db", &db) != SQLITE_OK) {
-        std::cerr << "Can't open database\n";
-        return 1;
-    }
-
-    bool ok = true;
-    ok &= execute_sql(db, ddl_inspection_groups);
-    ok &= execute_sql(db, ddl_inspection_faces);
-    ok &= execute_sql(db, ddl_defect_detections);
-
-    if (ok) std::cout << "All tables created successfully!\n";
-
-    // 简单验证外键生效
-    execute_sql(db, "PRAGMA foreign_keys = ON;");
-    execute_sql(db,
-        "INSERT INTO inspection_groups(group_id,device_id,status) "
-        "VALUES (1,'D001','GOOD');");
-    execute_sql(db,
-        "INSERT INTO inspection_faces(group_id,face_index,timestamp_ms,sequence_id,saved_path,skeleton_path) "
-        "VALUES (1,0,1680000000000,1001,'/a/0.jpg','/a/0_sk.jpg');");
-    execute_sql(db,
-        "INSERT INTO defect_detections(face_id,label_id,label,confidence,bbox_x,bbox_y,bbox_w,bbox_h,length,area) "
-        "VALUES (1,2,'scratch',0.9234,10.5,20.0,30.0,40.0,50.0,600.0);");
-
-    std::cout << "Foreign key & cascade test passed.\n";
-    sqlite3_close(db);
-    std::cout << "数据库已写入 my_inspection.db\n";
-    return ok ? 0 : 2;
-}
+//#include <sqlite3.h>
+//#include <iostream>
+//#include <string>
+//
+//static const char* ddl_inspection_groups = R"(
+//CREATE TABLE IF NOT EXISTS inspection_groups (
+//    group_id     INTEGER PRIMARY KEY,          -- 对应 MySQL BIGINT UNSIGNED PK
+//    device_id    TEXT    NOT NULL,
+//    status       TEXT    NOT NULL
+//                 CHECK (status IN ('NG','GOOD')),
+//    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+//    updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+//);
+//CREATE INDEX IF NOT EXISTS idx_device_id     ON inspection_groups(device_id);
+//CREATE INDEX IF NOT EXISTS idx_status        ON inspection_groups(status);
+//CREATE INDEX IF NOT EXISTS idx_g_created_time ON inspection_groups(created_time);
+//)";
+//
+//static const char* ddl_inspection_faces = R"(
+//CREATE TABLE IF NOT EXISTS inspection_faces (
+//    face_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+//    group_id      INTEGER NOT NULL,
+//    face_index    INTEGER NOT NULL CHECK (face_index BETWEEN 0 AND 3),
+//    timestamp_ms  INTEGER NOT NULL,
+//    sequence_id   INTEGER NOT NULL,
+//    saved_path    TEXT    NOT NULL,
+//    skeleton_path TEXT    NOT NULL,
+//    created_time  DATETIME DEFAULT CURRENT_TIMESTAMP,
+//    UNIQUE(group_id, face_index),
+//    FOREIGN KEY (group_id) REFERENCES inspection_groups(group_id) ON DELETE CASCADE
+//);
+//CREATE INDEX IF NOT EXISTS idx_group_id     ON inspection_faces(group_id);
+//CREATE INDEX IF NOT EXISTS idx_timestamp_ms ON inspection_faces(timestamp_ms);
+//CREATE INDEX IF NOT EXISTS idx_sequence_id  ON inspection_faces(sequence_id);
+//)";
+//
+//static const char* ddl_defect_detections = R"(
+//CREATE TABLE IF NOT EXISTS defect_detections (
+//    detection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+//    face_id      INTEGER NOT NULL,
+//    label_id     INTEGER NOT NULL,
+//    label        TEXT    NOT NULL,
+//    confidence   REAL    NOT NULL,          -- 0.0-1.0
+//    bbox_x       REAL    NOT NULL,
+//    bbox_y       REAL    NOT NULL,
+//    bbox_w       REAL    NOT NULL,
+//    bbox_h       REAL    NOT NULL,
+//    length       REAL    NOT NULL,
+//    area         REAL    NOT NULL,
+//    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+//    FOREIGN KEY (face_id) REFERENCES inspection_faces(face_id) ON DELETE CASCADE
+//);
+//CREATE INDEX IF NOT EXISTS idx_face_id     ON defect_detections(face_id);
+//CREATE INDEX IF NOT EXISTS idx_label_id    ON defect_detections(label_id);
+//CREATE INDEX IF NOT EXISTS idx_confidence  ON defect_detections(confidence);
+//)";
+//
+//bool execute_sql(sqlite3* db, const std::string& sql) {
+//    char* err = nullptr;
+//    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
+//        std::cerr << "SQLite error: " << (err ? err : "unknown") << '\n';
+//        sqlite3_free(err);
+//        return false;
+//    }
+//    return true;
+//}
+//
+//int main() {
+//    sqlite3* db = nullptr;
+//    if (sqlite3_open("my_inspection.db", &db) != SQLITE_OK) {
+//        std::cerr << "Can't open database\n";
+//        return 1;
+//    }
+//
+//    bool ok = true;
+//    ok &= execute_sql(db, ddl_inspection_groups);
+//    ok &= execute_sql(db, ddl_inspection_faces);
+//    ok &= execute_sql(db, ddl_defect_detections);
+//
+//    if (ok) std::cout << "All tables created successfully!\n";
+//
+//    // 简单验证外键生效
+//    execute_sql(db, "PRAGMA foreign_keys = ON;");
+//    execute_sql(db,
+//        "INSERT INTO inspection_groups(group_id,device_id,status) "
+//        "VALUES (1,'D001','GOOD');");
+//    execute_sql(db,
+//        "INSERT INTO inspection_faces(group_id,face_index,timestamp_ms,sequence_id,saved_path,skeleton_path) "
+//        "VALUES (1,0,1680000000000,1001,'/a/0.jpg','/a/0_sk.jpg');");
+//    execute_sql(db,
+//        "INSERT INTO defect_detections(face_id,label_id,label,confidence,bbox_x,bbox_y,bbox_w,bbox_h,length,area) "
+//        "VALUES (1,2,'scratch',0.9234,10.5,20.0,30.0,40.0,50.0,600.0);");
+//
+//    std::cout << "Foreign key & cascade test passed.\n";
+//    sqlite3_close(db);
+//    std::cout << "数据库已写入 my_inspection.db\n";
+//    return ok ? 0 : 2;
+//}

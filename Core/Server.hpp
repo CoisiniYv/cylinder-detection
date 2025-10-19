@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <WinSock2.h>
 #include <WS2tcpip.h>
@@ -62,7 +62,6 @@ namespace XL {
         double min_diameter_mm = 0.0;       // 最小圆直径阈值（mm），默认0表示不限制
 
         // 结果输出与标签
-        std::string result_image_path = "./output/detection_result.png";
         std::vector<std::string> labels{}; // 可从配置或客户端传入
 
         // SAM 模型（前端传入名称，相对 modelDir 或包含子路径；服务端拼接得到完整路径）
@@ -81,6 +80,8 @@ namespace XL {
         Config* config = nullptr;
         DetectParams last_params; // 最近一次 /api/control/add 的参数
         std::atomic<bool> has_task{ false };
+        // 本次程序运行的唯一批次ID（由 main 生成并注册到 inspection_runs）
+        std::string run_id; 
     };
 
     class Server {

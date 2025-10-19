@@ -5,6 +5,6 @@
 
 
     "modelDir": "E:\\ydk\\resource\\models",
-    "uploadDir": "E:\\ydk\\resource\\output"
-
+    "uploadDir": "E:\\ydk\\resource\\output",
+    "dbPath": "E:\\ydk\\resource\\my_inspection.db"
 }

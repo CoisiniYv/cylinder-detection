@@ -132,14 +132,15 @@ std::string HalconProcessor::generateTempFilename(std::uint64_t group_id, int im
 }
 
 std::string HalconProcessor::generateSavePathFilename(const std::string& savePath,
-    const std::string& uuid) const
+    const std::string& uuid,
+    int image_id) const
 {
     // 构建完整路径: savePath/uuid/
     std::string directoryPath = savePath + "/" + uuid + "/";
     std::filesystem::create_directories(directoryPath);
 
-    // 构建文件名: skeleton_ + uuid + .png
-    return directoryPath + "skeleton_" + uuid + ".png";
+    // 构建文件名: skeleton_i<image_id>.png
+    return directoryPath + "skeleton_i" + std::to_string(image_id) + ".png";
 }
 
 void HalconProcessor::dev_update_off()
@@ -410,7 +411,7 @@ bool HalconProcessor::processImage(const cv::cuda::GpuMat& inputImage,
         std::string saveOutputPath;
         const bool doSaveToPath = enableSaveToPath && !uuid.empty() && !savePath.empty();
         if (doSaveToPath) {
-            saveOutputPath = generateSavePathFilename(savePath, uuid);
+            saveOutputPath = generateSavePathFilename(savePath, uuid, image_id);
         }
 
         // 设置输出路径（优先返回用户指定保存路径；否则返回临时路径；否则为空）

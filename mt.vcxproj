@@ -140,6 +140,7 @@
   <ItemGroup>
     <ClCompile Include="Core\camera_thread.cpp" />
     <ClCompile Include="Core\Config.cpp" />
+    <ClCompile Include="Core\db_utils.cpp" />
     <ClCompile Include="Core\detect\crop_image.cpp" />
     <ClCompile Include="Core\detect\engineTRT.cpp" />
     <ClCompile Include="Core\detect\HalconProcessor.cpp" />
@@ -159,6 +160,7 @@
   <ItemGroup>
     <ClInclude Include="Core\camera_thread.hpp" />
     <ClInclude Include="Core\Config.hpp" />
+    <ClInclude Include="Core\db_utils.hpp" />
     <ClInclude Include="Core\detect\config.h" />
     <ClInclude Include="Core\detect\crop_image.h" />
     <ClInclude Include="Core\detect\cuda_utils.h" />

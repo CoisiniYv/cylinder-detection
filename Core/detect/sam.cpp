@@ -37,6 +37,10 @@ std::vector<cv::Mat> SamSegmenter::inferFromDetections(cv::Mat& image,
         return masks;
     }
 
+    // 重置最近一次的度量缓存
+    mLastAreasPx.clear();
+    mLastDiametersPx.clear();
+
     // 对每个检测框，生成一个 mask，并按阈值过滤（面积 & 外接圆直径）
     masks.reserve(detections.num);
 
@@ -64,20 +68,22 @@ std::vector<cv::Mat> SamSegmenter::inferFromDetections(cv::Mat& image,
         // 使用 SpeedSam 进行推理
         cv::Mat mask = mSam->predict(image, bboxPoints, labels);
 
-        // 基于掩码进行过滤
+        // 预计算度量（面积/直径），并用于阈值过滤；保留后也写入 mLastAreasPx/mLastDiametersPx
         bool keep = true;
+        double area_pixels = 0.0;
+        float diameter = 0.0f;
         if (!mask.empty()) {
             // 二值化后计算面积（像素个数）
             cv::Mat bin;
             cv::compare(mask, bin_thresh, bin, cv::CMP_GT); // 0/255, CV_8U
-            int area_pixels = cv::countNonZero(bin);
+            area_pixels = static_cast<double>(cv::countNonZero(bin));
 
-            if (area_threshold_px > 0.0f && static_cast<float>(area_pixels) < area_threshold_px) {
+            if (area_threshold_px > 0.0f && area_pixels < static_cast<double>(area_threshold_px)) {
                 keep = false;
             }
 
             if (keep && diameter_threshold_px > 0.0f) {
-                float diameter = calculateMaskCircleDiameter(mask, bin_thresh);
+                diameter = calculateMaskCircleDiameter(mask, bin_thresh);
                 if (diameter < diameter_threshold_px) {
                     keep = false;
                 }
@@ -85,6 +91,13 @@ std::vector<cv::Mat> SamSegmenter::inferFromDetections(cv::Mat& image,
         }
 
         if (keep) {
+            // 若未计算直径（未启用阈值或空 mask），此处补算以供外部使用
+            if (diameter <= 0.0f && !mask.empty()) {
+                diameter = calculateMaskCircleDiameter(mask, bin_thresh);
+            }
+            mLastAreasPx.push_back(area_pixels);
+            mLastDiametersPx.push_back(static_cast<double>(diameter));
+
             masks.emplace_back(std::move(mask));
             kept_boxes.emplace_back(detections.boxes[i]);
             kept_classes.emplace_back(detections.classes[i]);
@@ -141,11 +154,10 @@ float SamSegmenter::calculateMaskCircleDiameter(const cv::Mat& mask, float bin_t
         }
     }
 
-    // 计算最小外接圆直径
-    cv::Point2f center;
-    float radius = 0.0f;
+    // 计算最大轮廓的最小外接圆直径
+    cv::Point2f center; float radius = 0.0f;
     cv::minEnclosingCircle(contours[largest_idx], center, radius);
-    return radius * 2.0f;
+    return 2.0f * radius;
 }
 
 cv::Mat SamSegmenter::visualize(const cv::cuda::GpuMat& gpuImage,
@@ -153,7 +165,8 @@ cv::Mat SamSegmenter::visualize(const cv::cuda::GpuMat& gpuImage,
                                 const std::vector<cv::Mat>& masks,
                                 bool enableSaveToPath,
                                 const std::string& uuid,
-                                const std::string& savePath) {
+                                const std::string& savePath,
+                                int image_index) {
     // 将 GPU 图像下载到 CPU
     cv::Mat image;
     if (!gpuImage.empty()) {
@@ -194,7 +207,7 @@ cv::Mat SamSegmenter::visualize(const cv::cuda::GpuMat& gpuImage,
         try {
             std::filesystem::path out_dir = std::filesystem::path(savePath) / uuid;
             std::filesystem::create_directories(out_dir);
-            std::filesystem::path out_file = out_dir / (std::string("seg_") + uuid + ".png");
+            std::filesystem::path out_file = out_dir / (std::string("output_i") + std::to_string(image_index) + ".png");
             cv::imwrite(out_file.string(), result);
         } catch (const std::exception& e) {
             fprintf(stderr, "[SamSegmenter] 保存分割结果失败: %s\n", e.what());

@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 #include <string>
 #include <vector>
 
@@ -15,13 +15,15 @@ namespace XL{
 	public:
 		const char* file = NULL;
 
-		std::string ip{};//Ö÷»úIPµØÖ· 10.37.57.112
+		std::string ip{};//IPåœ°å€10.37.57.112
 
-		int analyzerPort;// ·ÖÎö·şÎñ¶Ë¿Ú 
+		int analyzerPort;//æœåŠ¡å™¨ç«¯å£ 
 
 		std::string outputdir{};
 
 		std::string modelDir{};
+
+		std::string dbPath{}; // æ•°æ®åº“æ–‡ä»¶è·¯å¾„ï¼ˆä¾‹å¦‚ E:\ydk\resource\my_inspection.dbï¼‰
 
 
 	};

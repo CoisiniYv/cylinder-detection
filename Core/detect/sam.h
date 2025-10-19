@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/cuda.hpp>
@@ -41,10 +41,19 @@ public:
                       const std::vector<cv::Mat>& masks,
                       bool enableSaveToPath = false,
                       const std::string& uuid = std::string(),
-                      const std::string& savePath = std::string());
+                      const std::string& savePath = std::string(),
+                      int image_index = -1);
+
+    // 获取最近一次 inferFromDetections 计算得到的每个检测的像素面积与直径（长度近似），与返回的 masks/过滤后的 detections 一一对齐
+    const std::vector<double>& lastAreasPx() const { return mLastAreasPx; }
+    const std::vector<double>& lastDiametersPx() const { return mLastDiametersPx; }
 
 private:
     std::unique_ptr<SpeedSam> mSam;
+
+    // 最近一次推理的度量（与过滤后的 detections 对齐）
+    std::vector<double> mLastAreasPx;
+    std::vector<double> mLastDiametersPx;
 
     // 将多个 float 掩码组合成一个二值掩码（0/255）
     cv::Mat combineBinaryMask(const std::vector<cv::Mat>& masks, float thresh = 0.5f);

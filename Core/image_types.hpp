@@ -1,4 +1,4 @@
-/*
+﻿/*
  * image_types.hpp
  *  Created on: 2025年10月17日
  * 核心数据结构，包括四张图为一组的结构，单张图结果，四张图结果等
@@ -101,7 +101,10 @@ namespace XL {
         int label_id = -1;               // 类别 id
         std::string label;               // 类别名称
         float confidence = 0.f;          // 置信度 [0,1]
-        BBox box{};                      // 检测框
+        BBox box{};                      // 检测框（像素）
+        // 适配数据库的度量字段（像素单位，后续可由 pix_to_mm 转换为 mm）：
+        double length = 0.0;             // 缺陷长度（px），默认0，后续由检测线程填充
+        double area = 0.0;               // 缺陷面积（px²），默认0，后续由检测线程填充
     };
 
     // 单张图的分析结果
@@ -111,9 +114,9 @@ namespace XL {
         // 检测列表
         std::vector<Detection> detections{};
 
-        // 输出资源（例如保存路径/缩略图等），按需使用
+        // 输出资源（与数据库字段匹配）
         std::string saved_path;          // 原图或可视化结果的保存路径
-        std::string thumbnail_path;      // 缩略图保存路径
+        std::string skeleton_path;       // 骨架图保存路径（若暂未生成，可留空，由上层回填）
     };
 
     // 四张图组的分析结果（与 QuadFrame 对应）

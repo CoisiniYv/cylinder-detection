@@ -76,8 +76,7 @@ def build_payload(args, model_dir):
         "pix_to_mm": args.pix_to_mm,
         "min_area_mm2": args.min_area_mm2,
         "min_diameter_mm": args.min_diameter_mm,
-        # 输出与标签
-        "result_image_path": args.result_img,
+        # 输出与标签（由服务端统一保存到 uploadDir/run_<run_id>_<group_id>）
         "labels": args.labels,
         # 设备与采集节奏
         "device_id": args.device_id,
@@ -159,8 +158,6 @@ def main():
     parser.add_argument("--min_diameter_mm", type=float, default=0.0, help="最小直径阈值（mm），0 表示不限制")
 
     # 输出与标签
-    parser.add_argument("--result_img", default=os.path.join(os.path.dirname(__file__), "..", "output"),
-                        help="结果可视化图片保存目录或文件路径；若指定目录，服务端将自动生成不重复的文件名")
     parser.add_argument("--labels", nargs="*", default=[ "hh-Y","class_1","ox-Y","class_3","class_4","class_5", "class_6"], help="标签列表，例如：--labels good bad")
 
     args = parser.parse_args()

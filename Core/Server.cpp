@@ -8,6 +8,7 @@
 #ifdef WIN32
 #pragma comment(lib, "ws2_32.lib")
 #endif
+#include "db_utils.hpp"
 
 
 
@@ -196,9 +197,7 @@ static DetectParams parse_params_from_get(struct evhttp_request* req, ServerStat
     p.min_area_mm2 = parse_double(get("min_area_mm2"), 0.0);
     p.min_diameter_mm = parse_double(get("min_diameter_mm"), 0.0);
 
-    // 输出与标签
-    p.result_image_path = get("result_image_path");
-    if (p.result_image_path.empty()) p.result_image_path = "./output/detection_result.png";
+    // 输出与标签（移除 result_image_path 参数，统一保存到 uploadDir/run_<run_id>_<group_id>）
     {
         std::string labels = get("labels");
         if (!labels.empty()) {
@@ -293,7 +292,7 @@ static DetectParams parse_params_from_post(struct evhttp_request* req, ServerSta
     p.slice_distance = getI("slice_distance", 40);
     p.nms_threshold = getF("nms_threshold", 0.45f);
     p.conf_threshold = getF("conf_threshold", 0.20f);
-    p.result_image_path = getS("result_image_path", "./output/detection_result.png");
+    // 移除 result_image_path 参数，统一保存到 uploadDir/run_<run_id>_<group_id>
 
     // SAM 过滤参数（mm、mm^2）
     p.pix_to_mm = getD("pix_to_mm", 0.021);
@@ -405,7 +404,7 @@ void api_control_add(struct evhttp_request* req, void* arg) {
     data["slice_distance"] = p.slice_distance;
     data["nms_threshold"] = p.nms_threshold;
     data["conf_threshold"] = p.conf_threshold;
-    data["result_image_path"] = p.result_image_path;
+    // 不再回显 result_image_path（统一保存至 uploadDir/run_<run_id>_<group_id>）
     // 回显 SAM 过滤参数（mm、mm^2 & pix_to_mm）
     data["pix_to_mm"] = p.pix_to_mm;
     data["min_area_mm2"] = p.min_area_mm2;
