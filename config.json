@@ -1,0 +1,10 @@
+{
+    "version": "3.99",
+    "ip": "10.37.57.112",
+    "analyzerPort": 9003,
+
+
+    "modelDir": "E:\\ydk\\resource\\models",
+    "uploadDir": "E:\\ydk\\resource\\output"
+
+}
