@@ -118,7 +118,7 @@ def main():
     parser.add_argument("--line_y1", type=int, default=1216, help="线起点 Y1")
     parser.add_argument("--line_x2", type=int, default=2525, help="线终点 X2")
     parser.add_argument("--line_y2", type=int, default=1216, help="线终点 Y2")
-    parser.add_argument("--stripe_radius", type=int, default=225, help="条纹影响半径")
+    parser.add_argument("--stripe_radius", type=int, default=250, help="条纹影响半径")
 
     # 条纹去除/去噪参数
     parser.add_argument("--filter_width", type=int, default=10, help="滤波窗口宽度")
@@ -126,7 +126,7 @@ def main():
     parser.add_argument("--target_angle", type=int, default=90, help="目标角度")
     parser.add_argument("--angle_tolerance", type=int, default=10, help="角度容差")
     parser.add_argument("--enable_denoising", type=int, default=1, help="启用去噪")
-    parser.add_argument("--denoise_h", type=float, default=5.0, help="去噪参数 h")
+    parser.add_argument("--denoise_h", type=float, default=8.0, help="去噪参数 h")
     parser.add_argument("--denoise_hColor", type=float, default=8.0, help="去噪参数 hColor")
     parser.add_argument("--denoise_search_window", type=int, default=17, help="去噪搜索窗口")
     parser.add_argument("--denoise_template_window", type=int, default=11, help="去噪模板窗口")

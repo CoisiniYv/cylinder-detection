@@ -474,7 +474,7 @@ bool HalconProcessor::processImage(const cv::cuda::GpuMat& inputImage,
         HalconCpp::ScaleImage(ho_ImageVTexture, &ho_EnhancedImage, 3, 0);
         HalconCpp::Threshold(ho_EnhancedImage, &ho_BrightRegions, 128, 255);
         HalconCpp::Connection(ho_BrightRegions, &ho_ConnectedRegions1);
-        HalconCpp::SelectShape(ho_ConnectedRegions1, &ho_FinalRegions, "area", "and", 250, 99999);
+        HalconCpp::SelectShape(ho_ConnectedRegions1, &ho_FinalRegions, "area", "and", 100, 99999);
         HalconCpp::Connection(ho_FinalRegions, &ho_ConnectedRegions1);
 
 
