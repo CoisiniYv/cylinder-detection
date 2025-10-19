@@ -2,7 +2,7 @@
 #include <string>
 #include "Core/Server.hpp"
 #include "Core/Config.hpp"
-
+//#include "Core/sqlite_helper.hpp"
 using namespace XL;
 
 int main(int argc, char** argv) {
@@ -57,6 +57,11 @@ int main(int argc, char** argv) {
         return -1;
     }
 }
+
+
+
+
+
 
 //#include "Core/detect/trtyolo_slice.hpp"
 //#include "Core/detect/HalconProcessor.h"
@@ -250,4 +255,43 @@ int main(int argc, char** argv) {
 //        std::cerr << "程序执行出错: 未知异常" << std::endl;
 //        return -1;
 //    }
+//}
+
+
+
+
+
+
+//int main() {
+//    try {
+//        SQLiteHelper db("demo.db");
+//
+//        // 1. 建表
+//        db.execute(R"(
+//            CREATE TABLE IF NOT EXISTS person(
+//                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+//                name TEXT,
+//                age  INTEGER,
+//                pic  BLOB);
+//        )");
+//        // 2. 参数化插入（事务）
+//        db.begin();
+//        db.prepare("INSERT INTO person(name,age) VALUES(?,?);");
+//        db.bind(1, std::string("Alice"));
+//        db.bind(2, 19);
+//        db.step();
+//        db.prepare("INSERT INTO person(name,age) VALUES(?,?);");
+//        db.bind(1, std::string("Bob"));
+//        db.bind(2, 21);
+//        db.step();
+//        db.commit();
+//        // 3. 查询
+//        auto rows = db.query("SELECT id,name,age FROM person;");
+//        for (auto& r : rows)
+//            std::cout << "id=" << r[0] << "  name=" << r[1] << "  age=" << r[2] << '\n';
+//    }
+//    catch (const std::exception& e) {
+//        std::cerr << "SQLite error: " << e.what() << '\n';
+//    }
+//    return 0;
 //}

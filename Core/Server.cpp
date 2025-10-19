@@ -17,6 +17,7 @@
 #include "Scheduler.hpp"
 #include <memory>
 #include <cstring>
+#include <cctype>
 
 using namespace XL;
 
@@ -106,6 +107,21 @@ static float parse_float(const std::string& s, float defv) {
     try { return std::stof(s); } catch (...) { return defv; }
 }
 
+// 组装路径（优先绝对路径；否则与配置中的 modelDir 拼接）
+static bool is_absolute_path(const std::string& p) {
+    if (p.size() >= 2 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':') return true; // C:\...
+    if (!p.empty() && (p[0] == '\\' || p[0] == '/')) return true; // \\server 或 /root
+    return false;
+}
+static std::string join_path(const std::string& base, const std::string& name) {
+    if (name.empty()) return std::string();
+    if (is_absolute_path(name)) return name;
+    if (base.empty()) return name;
+    const char sep = '\\';
+    if (!base.empty() && (base.back() == '\\' || base.back() == '/')) return base + name;
+    return base + sep + name;
+}
+
 // 从 GET 查询参数解析 DetectParams
 static DetectParams parse_params_from_get(struct evhttp_request* req, ServerState* state) {
     DetectParams p;
@@ -118,12 +134,28 @@ static DetectParams parse_params_from_get(struct evhttp_request* req, ServerStat
         return v ? std::string(v) : std::string();
     };
 
-    // 基本
+    // 基本与模型
+    const std::string modelDir = (state && state->config) ? state->config->modelDir : std::string();
+    p.yolo_model_name = get("yolo_model_name");
     p.trt_engine_file = get("trt_engine_file");
-    if (p.trt_engine_file.empty() && state && state->config) {
-        // 默认使用配置的 modelDir（如果前端未提供完整路径，后续 scheduler 可拼接）
-        p.trt_engine_file = state->config->modelDir;
+    // 解析 YOLO 模型路径（优先 yolo_model_name，其次 trt_engine_file）
+    if (!p.yolo_model_name.empty()) {
+        p.trt_engine_file = join_path(modelDir, p.yolo_model_name);
+    } else if (!p.trt_engine_file.empty()) {
+        if (!is_absolute_path(p.trt_engine_file)) {
+            p.trt_engine_file = join_path(modelDir, p.trt_engine_file);
+        }
+    } else {
+        // 兼容旧逻辑：若两者都为空，保留 modelDir，后续线程可根据需要补全/报错
+        p.trt_engine_file = modelDir;
     }
+
+    // SAM 模型名称（由前端传入，仅文件名或带子目录），服务端拼接为完整路径
+    p.sam_encoder_name = get("sam_encoder_name");
+    p.sam_decoder_name = get("sam_decoder_name");
+    p.sam_encoder_engine_file = join_path(modelDir, p.sam_encoder_name);
+    p.sam_decoder_engine_file = join_path(modelDir, p.sam_decoder_name);
+
     p.enable_swap_rb = parse_bool(get("enable_swap_rb"), true);
     p.input_image_path = get("input_image_path");
 
@@ -158,6 +190,11 @@ static DetectParams parse_params_from_get(struct evhttp_request* req, ServerStat
     p.slice_distance = parse_int(get("slice_distance"), 40);
     p.nms_threshold = parse_float(get("nms_threshold"), 0.45f);
     p.conf_threshold = parse_float(get("conf_threshold"), 0.20f);
+
+    // SAM 过滤参数（mm、mm^2）
+    p.pix_to_mm = parse_double(get("pix_to_mm"), 0.021);
+    p.min_area_mm2 = parse_double(get("min_area_mm2"), 0.0);
+    p.min_diameter_mm = parse_double(get("min_diameter_mm"), 0.0);
 
     // 输出与标签
     p.result_image_path = get("result_image_path");
@@ -210,7 +247,22 @@ static DetectParams parse_params_from_post(struct evhttp_request* req, ServerSta
         return root.isMember(k) ? root[k].asDouble() : def;
     };
 
-    p.trt_engine_file = getS("trt_engine_file", state && state->config ? state->config->modelDir : "");
+    const std::string modelDir = (state && state->config) ? state->config->modelDir : std::string();
+    p.yolo_model_name = getS("yolo_model_name", "");
+    std::string trt = getS("trt_engine_file", "");
+    if (!p.yolo_model_name.empty()) {
+        p.trt_engine_file = join_path(modelDir, p.yolo_model_name);
+    } else if (!trt.empty()) {
+        p.trt_engine_file = is_absolute_path(trt) ? trt : join_path(modelDir, trt);
+    } else {
+        p.trt_engine_file = modelDir; // 兼容旧逻辑
+    }
+
+    p.sam_encoder_name = getS("sam_encoder_name", "");
+    p.sam_decoder_name = getS("sam_decoder_name", "");
+    p.sam_encoder_engine_file = join_path(modelDir, p.sam_encoder_name);
+    p.sam_decoder_engine_file = join_path(modelDir, p.sam_decoder_name);
+
     p.enable_swap_rb = getB("enable_swap_rb", true);
     p.input_image_path = getS("input_image_path", "");
 
@@ -242,6 +294,11 @@ static DetectParams parse_params_from_post(struct evhttp_request* req, ServerSta
     p.nms_threshold = getF("nms_threshold", 0.45f);
     p.conf_threshold = getF("conf_threshold", 0.20f);
     p.result_image_path = getS("result_image_path", "./output/detection_result.png");
+
+    // SAM 过滤参数（mm、mm^2）
+    p.pix_to_mm = getD("pix_to_mm", 0.021);
+    p.min_area_mm2 = getD("min_area_mm2", 0.0);
+    p.min_diameter_mm = getD("min_diameter_mm", 0.0);
 
     if (root.isMember("labels") && root["labels"].isArray()) {
         for (const auto& v : root["labels"]) {
@@ -300,7 +357,8 @@ void api_control_add(struct evhttp_request* req, void* arg) {
     // 保存到共享状态供后续 scheduler 使用
     state->last_params = p;
     state->has_task.store(true, std::memory_order_relaxed);
-    LOGI("接收到检测任务：engine=%s, delay_ms=%d, device_id=%s", p.trt_engine_file.c_str(), p.delay_ms, p.device_id.c_str());
+    LOGI("接收到检测任务：yolo=%s, sam_encoder=%s, sam_decoder=%s, delay_ms=%d, device_id=%s",
+        p.trt_engine_file.c_str(), p.sam_encoder_engine_file.c_str(), p.sam_decoder_engine_file.c_str(), p.delay_ms, p.device_id.c_str());
 
     // 启动/重启调度器
     if (!g_scheduler) {
@@ -312,7 +370,14 @@ void api_control_add(struct evhttp_request* req, void* arg) {
 
     // 返回回显
     Json::Value data;
+    data["modelDir"] = state->config ? state->config->modelDir : "";
+    data["yolo_model_name"] = p.yolo_model_name;
     data["trt_engine_file"] = p.trt_engine_file;
+    data["sam_encoder_name"] = p.sam_encoder_name;
+    data["sam_decoder_name"] = p.sam_decoder_name;
+    data["sam_encoder_engine_file"] = p.sam_encoder_engine_file;
+    data["sam_decoder_engine_file"] = p.sam_decoder_engine_file;
+
     data["enable_swap_rb"] = p.enable_swap_rb;
     data["input_image_path"] = p.input_image_path;
     data["crop_x"] = p.crop_x;
@@ -341,6 +406,10 @@ void api_control_add(struct evhttp_request* req, void* arg) {
     data["nms_threshold"] = p.nms_threshold;
     data["conf_threshold"] = p.conf_threshold;
     data["result_image_path"] = p.result_image_path;
+    // 回显 SAM 过滤参数（mm、mm^2 & pix_to_mm）
+    data["pix_to_mm"] = p.pix_to_mm;
+    data["min_area_mm2"] = p.min_area_mm2;
+    data["min_diameter_mm"] = p.min_diameter_mm;
     data["delay_ms"] = p.delay_ms;
     data["device_id"] = p.device_id;
     {

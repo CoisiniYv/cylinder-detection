@@ -38,6 +38,9 @@ def build_payload(args, model_dir):
     payload = {
         # 模型与图像预处理
         "trt_engine_file": trt_engine_file,
+        "yolo_model_name": args.yolo_model_name,
+        "sam_encoder_name": args.sam_encoder_name,
+        "sam_decoder_name": args.sam_decoder_name,
         "enable_swap_rb": True,
         # ROI（示例默认值，可通过命令行覆盖）
         "crop_x": args.crop_x,
@@ -69,6 +72,10 @@ def build_payload(args, model_dir):
         # 阈值（与服务端字段一致）
         "nms_threshold": args.nms_thresh,
         "conf_threshold": args.conf_thresh,
+        # SAM 过滤参数（以毫米为单位）
+        "pix_to_mm": args.pix_to_mm,
+        "min_area_mm2": args.min_area_mm2,
+        "min_diameter_mm": args.min_diameter_mm,
         # 输出与标签
         "result_image_path": args.result_img,
         "labels": args.labels,
@@ -106,6 +113,9 @@ def main():
 
     # 模型文件
     parser.add_argument("--trt_engine_file", default=None, help="TensorRT 引擎文件路径（默认：从 modelDir 自动寻找 .engine）")
+    parser.add_argument("--yolo_model_name", default="yolo\\best.engine", help="YOLO 模型文件名或相对 modelDir 的子路径，例如 yolo\\best.engine")
+    parser.add_argument("--sam_encoder_name", default="SAM\\SAM_encoder.engine", help="SAM 编码器文件名或相对 modelDir 的子路径")
+    parser.add_argument("--sam_decoder_name", default="SAM\\SAM_mask_decoder.engine", help="SAM 解码器文件名或相对 modelDir 的子路径")
 
     # ROI 参数
     parser.add_argument("--crop_x", type=int, default=0, help="ROI 左上角 X")
@@ -140,8 +150,13 @@ def main():
                         help="切片保存目录")
 
     # 阈值（字段必须与服务端一致）
-    parser.add_argument("--nms_thresh", dest="nms_thresh", type=float, default=0.45, help="NMS 阈值")
+    parser.add_argument("--nms_thresh", dest="nms_thresh", type=float, default=0.23, help="NMS 阈值")
     parser.add_argument("--conf_thresh", dest="conf_thresh", type=float, default=0.20, help="置信度阈值")
+
+    # SAM 过滤参数（毫米单位）
+    parser.add_argument("--pix_to_mm", type=float, default=0.021, help="像素到毫米的转换系数，例如 1pix=0.021mm")
+    parser.add_argument("--min_area_mm2", type=float, default=0.0, help="最小面积阈值（mm^2），0 表示不限制")
+    parser.add_argument("--min_diameter_mm", type=float, default=0.0, help="最小直径阈值（mm），0 表示不限制")
 
     # 输出与标签
     parser.add_argument("--result_img", default=os.path.join(os.path.dirname(__file__), "..", "output"),

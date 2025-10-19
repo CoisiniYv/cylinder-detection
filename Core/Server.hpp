@@ -1,4 +1,5 @@
 #pragma once
+
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <json/json.h>
@@ -22,6 +23,7 @@ namespace XL {
         std::string trt_engine_file;           // 模型引擎文件路径（默认从配置读取）
         bool enable_swap_rb = false;            // 是否启用 R/B 交换
         std::string input_image_path;          // 待检测图像路径（最终应来自队列，这里用于测试）
+        std::string yolo_model_name;           // 相对 modelDir 的 YOLO 引擎文件名或子路径（前端传入）
 
         // ROI 裁剪与条纹线
         int crop_x = 0;
@@ -54,9 +56,20 @@ namespace XL {
         float nms_threshold = 0.45f;
         float conf_threshold = 0.20f;
 
+        // SAM 过滤参数（单位：毫米/平方毫米；通过 pix_to_mm 转换成像素使用）
+        double pix_to_mm = 0.021;           // 像素转毫米系数（1 pix = pix_to_mm mm）
+        double min_area_mm2 = 0.0;          // 最小面积阈值（mm^2），默认0表示不限制
+        double min_diameter_mm = 0.0;       // 最小圆直径阈值（mm），默认0表示不限制
+
         // 结果输出与标签
         std::string result_image_path = "./output/detection_result.png";
         std::vector<std::string> labels{}; // 可从配置或客户端传入
+
+        // SAM 模型（前端传入名称，相对 modelDir 或包含子路径；服务端拼接得到完整路径）
+        std::string sam_encoder_name;            // 例如："SAM/SAM_encoder.engine" 或仅 "SAM_encoder.engine"
+        std::string sam_decoder_name;            // 例如："SAM/SAM_mask_decoder.engine" 或仅 "SAM_mask_decoder.engine"
+        std::string sam_encoder_engine_file;     // 服务器拼接后的完整路径
+        std::string sam_decoder_engine_file;     // 服务器拼接后的完整路径
 
         // 相机参数
         int delay_ms = 0;                    // 拍摄间隔（毫秒）

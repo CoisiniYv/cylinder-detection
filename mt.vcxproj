@@ -74,7 +74,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LibraryPath>$(LibraryPath)</LibraryPath>
+    <LibraryPath>E:\ydk\op\ThirdParty\Sqlite\bin;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -124,7 +124,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>..\ThirdParty\concurrentqueue;..\ThirdParty\jsoncpp\include;..\ThirdParty\event\include;..\ThirdParty\MPHdc\inc;..\ThirdParty\curl\include;..\ThirdParty\opencv[cuda118]\include;..\ThirdParty\Halcon\include\halconcpp;..\ThirdParty\trtyolo\include;..\ThirdParty\Halcon\include;D:\Software\cu118\TensorRT\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ThirdParty\Sqlite\inc;..\ThirdParty\concurrentqueue;..\ThirdParty\jsoncpp\include;..\ThirdParty\event\include;..\ThirdParty\MPHdc\inc;..\ThirdParty\curl\include;..\ThirdParty\opencv[cuda118]\include;..\ThirdParty\Halcon\include\halconcpp;..\ThirdParty\trtyolo\include;..\ThirdParty\Halcon\include;D:\Software\cu118\TensorRT\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <PreprocessToFile>false</PreprocessToFile>
@@ -134,7 +134,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;..\ThirdParty\jsoncpp\x64\lib\Release\jsoncpp.lib;..\ThirdParty\event\x64\lib\Release\*.lib;..\ThirdParty\curl\x64\lib\Release\libcurl.lib;..\ThirdParty\MPHdc\lib\x64\MPHdc_API.lib;..\ThirdParty\opencv[cuda118]\x64\vc17\lib\opencv_world4110.lib;..\ThirdParty\Halcon\lib\x64-win64\halconcpp.lib;..\ThirdParty\Halcon\lib\x64-win64\hdevenginecpp.lib;..\ThirdParty\trtyolo\lib\trtyolo.lib;..\ThirdParty\trtyolo\lib\custom_plugins.lib;D:\Software\cu118\TensorRT\lib\nvinfer_10.lib;D:\Software\cu118\TensorRT\lib\nvonnxparser_10.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;..\ThirdParty\jsoncpp\x64\lib\Release\jsoncpp.lib;..\ThirdParty\event\x64\lib\Release\*.lib;..\ThirdParty\curl\x64\lib\Release\libcurl.lib;..\ThirdParty\MPHdc\lib\x64\MPHdc_API.lib;..\ThirdParty\opencv[cuda118]\x64\vc17\lib\opencv_world4110.lib;..\ThirdParty\Halcon\lib\x64-win64\halconcpp.lib;..\ThirdParty\Halcon\lib\x64-win64\hdevenginecpp.lib;..\ThirdParty\trtyolo\lib\trtyolo.lib;..\ThirdParty\trtyolo\lib\custom_plugins.lib;..\ThirdParty\Sqlite\dll\sqlite3.lib;D:\Software\cu118\TensorRT\lib\nvinfer_10.lib;D:\Software\cu118\TensorRT\lib\nvonnxparser_10.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -153,6 +153,7 @@
     <ClCompile Include="Core\queue_manager.cpp" />
     <ClCompile Include="Core\Scheduler.cpp" />
     <ClCompile Include="Core\Server.cpp" />
+    <ClCompile Include="Core\sqlite_herpler.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -176,6 +177,7 @@
     <ClInclude Include="Core\queue_manager.hpp" />
     <ClInclude Include="Core\Scheduler.hpp" />
     <ClInclude Include="Core\Server.hpp" />
+    <ClInclude Include="Core\sqlite_helper.hpp" />
     <ClInclude Include="Core\Utils\Common.hpp" />
     <ClInclude Include="Core\Utils\Log.hpp" />
   </ItemGroup>

@@ -72,6 +72,9 @@
     <ClCompile Include="Core\Scheduler.cpp">
       <Filter>源文件\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\sqlite_herpler.cpp">
+      <Filter>源文件\Core</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core\Utils\Log.hpp">
@@ -138,6 +141,9 @@
       <Filter>源文件\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\Scheduler.hpp">
+      <Filter>源文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\sqlite_helper.hpp">
       <Filter>源文件\Core</Filter>
     </ClInclude>
   </ItemGroup>

@@ -76,13 +76,37 @@ void DetectThread::run() {
             mModelReady = false;
         }
     }
-
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // 初始化 SAM 分割器（一次性）
+    if (!mSamReady || !mSam) {
+        try {
+            mSam = std::make_unique<SamSegmenter>();
+            const std::string encoderEngine = mParams.sam_encoder_engine_file;
+            const std::string decoderEngine = mParams.sam_decoder_engine_file;
+            if (encoderEngine.empty() || decoderEngine.empty()) {
+                std::cerr << "DetectThread[" << mIndex << "]: SAM engine paths are empty. Skip SAM init." << std::endl;
+                mSamReady = false;
+            } else {
+                mSamReady = mSam->init(encoderEngine, decoderEngine);
+                if (!mSamReady) {
+                    std::cerr << "DetectThread[" << mIndex << "]: SAM init failed." << std::endl;
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "DetectThread[" << mIndex << "]: SAM init exception: " << e.what() << std::endl;
+            mSamReady = false;
+        } catch (...) {
+            std::cerr << "DetectThread[" << mIndex << "]: SAM init unknown exception." << std::endl;
+            mSamReady = false;
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     if (!mModelReady || !mSliceDetector) {
         std::cerr << "DetectThread[" << mIndex << "]: model not ready, abort run." << std::endl;
         mRunning.store(false);
         return;
     }
-     std::this_thread::sleep_for(std::chrono::seconds(2));
+     std::this_thread::sleep_for(std::chrono::seconds(1));
     while (mRunning.load()) {
         // 以短超时阻塞，便于响应 stop
         ImageFrame frame;
@@ -172,7 +196,37 @@ void DetectThread::run() {
         // 可视化并保存（下载时使用流，并在写盘前等待完成）
         cv::Mat vis_cpu; d_cropped.download(vis_cpu, stream);
         stream.waitForCompletion();
-        trtyolo::SliceDetector::visualize_sliced_result(vis_cpu, detres, mParams.labels);
+
+        // 使用 SAM 进行分割并可视化；如 SAM 未就绪则回退到 YOLO 可视化
+        cv::Mat to_save;
+        // SAM 分割（若已成功初始化）
+        if (mSamReady && mSam) {
+            // 将 mm 阈值转换为像素阈值：
+            double pix_to_mm = mParams.pix_to_mm;
+            if (pix_to_mm <= 1e-9) {
+                // 防止除零；若未配置则按 1mm/pix 处理
+                pix_to_mm = 1.0;
+            }
+            float minAreaPx = 0.0f;
+            float minDiamPx = 0.0f;
+            if (mParams.min_area_mm2 > 0.0) {
+                minAreaPx = static_cast<float>(mParams.min_area_mm2 / (pix_to_mm * pix_to_mm));
+            }
+            if (mParams.min_diameter_mm > 0.0) {
+                minDiamPx = static_cast<float>(mParams.min_diameter_mm / pix_to_mm);
+            }
+            // 执行分割与筛选
+            mSam->inferFromDetections(vis_cpu, detres, minAreaPx, minDiamPx);
+
+            // 获取掩码并可视化
+            auto masks = mSam->getCurrentMasks();
+            cv::Mat seg_vis = mSam->visualize(d_cropped, detres, masks, false);
+            to_save = seg_vis.empty() ? vis_cpu : seg_vis;
+        } else {
+            trtyolo::SliceDetector::visualize_sliced_result(vis_cpu, detres, mParams.labels);
+            to_save = vis_cpu;
+        }
+
         std::filesystem::path base(mParams.result_image_path.empty() ? std::filesystem::path("./output") : std::filesystem::path(mParams.result_image_path));
         std::string save_path;
         // 始终生成唯一文件名，避免覆盖
@@ -187,7 +241,7 @@ void DetectThread::run() {
             ensure_dir(base);
             save_path = (base / fname).string();
         }
-        cv::imwrite(save_path, vis_cpu);
+        cv::imwrite(save_path, to_save);
 
         // 构造结果并入队
         SingleImageResult result;
