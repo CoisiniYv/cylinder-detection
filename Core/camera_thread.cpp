@@ -115,18 +115,33 @@ namespace XL {
         mDevice = nullptr;
     }
 
-    cv::Mat CameraThread::mergeBGR(unsigned char* b, unsigned char* g, unsigned char* r, int h, int w) {
-        if (!b || !g || !r || h <= 0 || w <= 0) return {};
-        // 将外部内存拷贝为 Mat
-        cv::Mat mb(h, w, CV_8UC1, b);
-        cv::Mat mg(h, w, CV_8UC1, g);
-        cv::Mat mr(h, w, CV_8UC1, r);
-        std::vector<cv::Mat> ch{ mr.clone(), mg.clone(), mb.clone() };
-        cv::Mat out;
-        cv::merge(ch, out); // B,G,R 合并为 CV_8UC3
-        return out;
+    // cv::Mat CameraThread::mergeBGR(unsigned char* b, unsigned char* g, unsigned char* r, int h, int w) {
+    //     if (!b || !g || !r || h <= 0 || w <= 0) return {};
+    //     // 将外部内存拷贝为 Mat
+    //     cv::Mat mb(h, w, CV_8UC1, b);
+    //     cv::Mat mg(h, w, CV_8UC1, g);
+    //     cv::Mat mr(h, w, CV_8UC1, r);
+    //     std::vector<cv::Mat> ch{ mb.clone(), mg.clone(), mr.clone() };
+    //     cv::Mat out;
+    //     cv::merge(ch, out); // B,G,R 合并为 CV_8UC3
+    //     return out;
+    // }
+    cv::Mat CameraThread::mergeBGR(unsigned char* ch0,
+        unsigned char* ch1,
+        unsigned char* ch2,
+        int h, int w)
+    {
+        cv::Mat rgb(h, w, CV_8UC3);
+        for (int y = 0; y < h; ++y) {
+            cv::Vec3b* row = rgb.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < w; ++x) {
+                row[x][0] = ch0[y * w + x];   // B
+                row[x][1] = ch1[y * w + x];   // G
+                row[x][2] = ch2[y * w + x];   // R
+            }
+        }
+        return rgb;
     }
-
     void CameraThread::captureLoop() {
         LOGI("CameraThread 采集循环开始");
 
@@ -168,14 +183,14 @@ namespace XL {
                     if (ptr && size == height * width) chPtr[c] = ptr;
                 }
 
-                if (!(chPtr[0] && chPtr[1] && chPtr[2] && chPtr[3] && chPtr[4] && chPtr[5])) {
+                if (!(chPtr[2] && chPtr[1] && chPtr[0] && chPtr[5] && chPtr[4] && chPtr[3])) {
                     LOGE("通道数据不完整，重试当前张");
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     continue;
                 }
 
-                cv::Mat ps = mergeBGR(chPtr[0], chPtr[1], chPtr[2], height, width);
-                cv::Mat rgb = mergeBGR(chPtr[3], chPtr[4], chPtr[5], height, width);
+                cv::Mat ps = mergeBGR(chPtr[2], chPtr[1], chPtr[0], height, width);
+                cv::Mat rgb = mergeBGR(chPtr[5], chPtr[4], chPtr[3], height, width);
                 if (ps.empty() || rgb.empty()) {
                     LOGE("OpenCV 合成失败，重试当前张");
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));

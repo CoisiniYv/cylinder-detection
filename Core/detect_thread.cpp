@@ -161,7 +161,6 @@ void DetectThread::run() {
         if (slices.empty()) {
             continue;
         }
-        // std::this_thread::sleep_for(std::chrono::seconds(1));  // 阻塞 2 秒
         // 切片推理
         trtyolo::DetectRes detres = mSliceDetector->process_sliced_images(
             slices,
