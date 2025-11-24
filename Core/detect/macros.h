@@ -1,15 +1,4 @@
-﻿#ifndef __MACROS_H
-#define __MACROS_H
-
-/// \file macros.h
-/// \brief Header file defining macros for API export and compatibility.
-///
-/// This header file contains macros that facilitate 
-/// the export and import of functions for shared libraries,
-/// as well as compatibility settings based on the NV TensorRT version.
-///
-/// \author Hamdi Boukamcha
-/// \date 2024
+﻿#pragma once
 
 #ifdef API_EXPORTS
 #if defined(_MSC_VER)
@@ -32,5 +21,3 @@
 #define TRT_NOEXCEPT ///< No exception specification for TensorRT version < 8.
 #define TRT_CONST_ENQUEUE ///< No const enqueue definition for TensorRT version < 8.
 #endif
-
-#endif  // __MACROS_H

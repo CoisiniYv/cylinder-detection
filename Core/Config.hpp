@@ -1,8 +1,9 @@
 ﻿#pragma once
+
 #include <string>
 #include <vector>
 
-namespace XL{
+namespace XL {
 	class Config
 	{
 	public:
@@ -24,7 +25,6 @@ namespace XL{
 		std::string modelDir{};
 
 		std::string dbPath{}; // 数据库文件路径（例如 E:\ydk\resource\my_inspection.db）
-
 
 	};
 }

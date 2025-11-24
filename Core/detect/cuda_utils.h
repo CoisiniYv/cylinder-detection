@@ -1,17 +1,6 @@
-﻿#ifndef TRTX_CUDA_UTILS_H_
-#define TRTX_CUDA_UTILS_H_
+﻿#pragma once
 
 #include <cuda_runtime_api.h>
-
-/// \file trtx_cuda_utils.h
-/// \brief Header file providing CUDA utility macros.
-///
-/// This header file defines utility macros for error checking
-/// in CUDA operations, allowing for easier debugging and error
-/// handling in GPU-related code.
-///
-/// \author Hamdi Boukamcha
-/// \date 2024
 
 #ifndef CUDA_CHECK
 /// \brief Macro for checking CUDA function calls.
@@ -48,6 +37,3 @@
             return val;                                                                                                \
         }                                                                                                              \
     } while (0)
-
-#endif  // TRTX_CUDA_UTILS_H_
-#pragma once
