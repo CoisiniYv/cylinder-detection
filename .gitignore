@@ -420,6 +420,10 @@ FodyWeavers.xsd
 # Built Visual Studio Code Extensions
 *.vsix
 
+# Ignore VS Code configs for this repo
+.vscode/
+**/.vscode/
+
 # Windows Installer files from build outputs
 *.cab
 *.msi
