@@ -182,7 +182,12 @@ namespace XL {
 			XL::g_camera_thread = std::make_shared<CameraThread>();
 		}
 		if (!XL::g_camera_thread->isRunning()) {
-			if (!XL::g_camera_thread->start(mParams.delay_ms, /*device_id*/mParams.device_id,"\\\\.\\COM17")) {
+			extern ServerState g_server_state;
+			const std::string slide_port = (g_server_state.config) ? g_server_state.config->slidePort : std::string();
+			const int slide_axis = (g_server_state.config) ? g_server_state.config->slideAxisId : 0;
+			const int slide_timeout_ms = (g_server_state.config) ? g_server_state.config->slideTimeoutMs : 20000;
+			if (!XL::g_camera_thread->start(mParams.delay_ms, /*device_id*/mParams.device_id,
+				slide_port, slide_axis, slide_timeout_ms, true)) {
 				LOGE("CameraThread 启动失败，停止调度器");
 				g_queue_manager.stop();
 				return false;
@@ -200,7 +205,6 @@ namespace XL {
 		}
 
 		// 数据库路径来自配置，缺省为 my_inspection.db（初始化已在 main 完成）
-		extern ServerState g_server_state;
 		const std::string dbfile = (g_server_state.config && !g_server_state.config->dbPath.empty())
 			? g_server_state.config->dbPath
 			: std::string("my_inspection.db");

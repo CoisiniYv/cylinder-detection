@@ -26,5 +26,10 @@ namespace XL {
 
 		std::string dbPath{}; // 数据库文件路径（例如 E:\ydk\resource\my_inspection.db）
 
+		// 滑台串口配置（UART1）
+		std::string slidePort{}; // 例如 "COM11" 或 "\\\\.\\COM11"
+		int slideAxisId = 0;     // 轴ID（推荐 0=X,1=Y,2=Z）
+		int slideTimeoutMs = 20000; // 等待下位机回报超时
+
 	};
 }

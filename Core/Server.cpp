@@ -482,7 +482,11 @@ void api_camera_single_capture(struct evhttp_request* req, void* arg) {
 		if (!was_running) {
 			const int delay_ms = state->last_params.delay_ms;
 			const std::string device_id = state->last_params.device_id;
-			if (!XL::g_camera_thread->start(delay_ms, device_id)) {
+			const std::string slide_port = (state->config) ? state->config->slidePort : std::string();
+			const int slide_axis = (state->config) ? state->config->slideAxisId : 0;
+			const int slide_timeout_ms = (state->config) ? state->config->slideTimeoutMs : 20000;
+			if (!XL::g_camera_thread->start(delay_ms, device_id,
+				slide_port, slide_axis, slide_timeout_ms, false)) {
 				send_json(req, -20, "相机启动失败或不可用");
 				return;
 			}

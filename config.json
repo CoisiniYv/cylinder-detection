@@ -6,5 +6,9 @@
 
     "modelDir": "E:\\ydk\\resource\\models",
     "uploadDir": "E:\\ydk\\resource\\output",
-    "dbPath": "E:\\ydk\\resource\\my_inspection.db"
+    "dbPath": "E:\\ydk\\resource\\my_inspection.db",
+
+    "slidePort": "",
+    "slideAxisId": 0,
+    "slideTimeoutMs": 20000
 }

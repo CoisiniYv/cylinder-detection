@@ -81,6 +81,9 @@
     <ClCompile Include="Core\Scheduler.cpp">
       <Filter>源文件\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\slide_serial.cpp">
+      <Filter>源文件\Core</Filter>
+    </ClCompile>
     <ClCompile Include="Core\sqlite_herpler.cpp">
       <Filter>源文件\Core</Filter>
     </ClCompile>
@@ -159,6 +162,9 @@
       <Filter>头文件\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\sqlite_helper.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\slide_serial.hpp">
       <Filter>头文件\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\trtyolo_slice.hpp">

@@ -157,6 +157,7 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     <ClCompile Include="Core\Scheduler.cpp" />
     <ClCompile Include="Core\Server.cpp" />
     <ClCompile Include="Core\single_detect_thread.cpp" />
+    <ClCompile Include="Core\slide_serial.cpp" />
     <ClCompile Include="Core\sqlite_herpler.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
@@ -183,6 +184,7 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     <ClInclude Include="Core\Scheduler.hpp" />
     <ClInclude Include="Core\Server.hpp" />
     <ClInclude Include="Core\single_detect_thread.hpp" />
+    <ClInclude Include="Core\slide_serial.hpp" />
     <ClInclude Include="Core\sqlite_helper.hpp" />
     <ClInclude Include="Core\Utils\Common.hpp" />
     <ClInclude Include="Core\Utils\Log.hpp" />

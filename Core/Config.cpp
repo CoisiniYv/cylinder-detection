@@ -12,7 +12,10 @@ namespace XL {
 		analyzerPort(0),
 		outputdir(""),
 		modelDir(""),
-		dbPath("")
+		dbPath(""),
+		slidePort(""),
+		slideAxisId(0),
+		slideTimeoutMs(20000)
 	{
 		std::ifstream ifs(file, std::ios::binary);
 		if (!ifs.is_open()) {
@@ -33,6 +36,9 @@ namespace XL {
 				this->outputdir = root.get("uploadDir", "").asString();
 				this->modelDir = root.get("modelDir", "").asString();
 				this->dbPath = root.get("dbPath", "").asString();
+				this->slidePort = root.get("slidePort", "").asString();
+				this->slideAxisId = root.get("slideAxisId", 0).asInt();
+				this->slideTimeoutMs = root.get("slideTimeoutMs", 20000).asInt();
 
 				std::filesystem::path path(outputdir);
 				try {
@@ -63,5 +69,8 @@ namespace XL {
 		LOGC("uploadDir: %s", outputdir.data());
 		LOGC("modelDir: %s", modelDir.data());
 		LOGC("dbPath: %s", dbPath.empty() ? "(empty)" : dbPath.c_str());
+		LOGC("slidePort: %s", slidePort.empty() ? "(empty)" : slidePort.c_str());
+		LOGC("slideAxisId: %d", slideAxisId);
+		LOGC("slideTimeoutMs: %d", slideTimeoutMs);
 	}
 }

@@ -5,6 +5,7 @@
 #include "Utils/Common.hpp"
 #include "Utils/Log.hpp"
 #include "MPHdc_API.h"
+#include "slide_serial.hpp"
 
 #include <thread>
 #include <atomic>
@@ -12,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <future>
+#include <vector>
 
 // --- Windows 宏冲突解决策略 ---
 #ifdef _WIN32
@@ -35,9 +37,17 @@ namespace XL {
 		 * 启动采集线程
 		 * @param delay_ms: 每张图拍摄后的额外等待延时
 		 * @param device_id: 相机标识
-		 * @param com_port: 串口号，例如 "COM3"，为空则不启用串口
+		 * @param slide_port: 滑台串口号，例如 "COM3"，为空则不启用滑台流程
+		 * @param slide_axis_id: 滑台轴ID（默认 0）
+		 * @param slide_timeout_ms: 等待下位机回报超时时间
+		 * @param enable_group_capture: 是否启用四面组采集流程
 		 */
-		bool start(int delay_ms = 0, const std::string& device_id = "", const std::string& com_port = "");
+		bool start(int delay_ms = 0,
+			const std::string& device_id = "",
+			const std::string& slide_port = "",
+			int slide_axis_id = 0,
+			int slide_timeout_ms = 20000,
+			bool enable_group_capture = true);
 
 		void stop();
 		void join();
@@ -62,11 +72,14 @@ namespace XL {
 		// BGR 通道合成
 		static cv::Mat mergeBGR(unsigned char* b, unsigned char* g, unsigned char* r, int h, int w);
 
-		// 串口通信私有方法
-		bool openSerial(const std::string& portName);
-		void closeSerial();
-		bool sendSerialCommand(const std::string& cmd);
-		std::string readSerialResponse();
+		// 滑台控制（UART1）
+		bool openSlideSerial();
+		void closeSlideSerial();
+		bool sendSlideCommand(int dir, int steps = 0, int dly = 0);
+		bool waitSlideResponseAny(const std::vector<std::string>& tokens, int timeout_ms);
+		bool waitSlideResponse(const std::string& token, int timeout_ms);
+		void drainSlideLines();
+		static bool lineHasToken(const std::string& line, const std::string& token);
 
 	private:
 		std::atomic<bool> mRunning{ false };
@@ -94,13 +107,12 @@ namespace XL {
 		bool mSingleCaptureRequested = false;
 		std::promise<ImageFrame> mSingleCapturePromise;
 
-		// 串口相关成员
-#ifdef _WIN32
-		HANDLE mSerialHandle = (HANDLE)(uintptr_t)-1; // 对应 INVALID_HANDLE_VALUE
-#else
-		void* mSerialHandle = nullptr;
-#endif
-		std::string mComPort;
+		// 滑台串口配置
+		SlideSerialClient mSlide;
+		SerialConfig mSlideCfg{};
+		int mSlideAxisId = 0;
+		int mSlideTimeoutMs = 20000;
+		bool mEnableGroupCapture = true;
 	};
 
 } // namespace XL

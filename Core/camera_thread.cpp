@@ -16,21 +16,30 @@ namespace XL {
 		cleanupDevice();
 	}
 
-	bool CameraThread::start(int delay_ms, const std::string& device_id, const std::string& com_port) {
+	bool CameraThread::start(int delay_ms,
+		const std::string& device_id,
+		const std::string& slide_port,
+		int slide_axis_id,
+		int slide_timeout_ms,
+		bool enable_group_capture) {
 		if (isRunning()) return true;
 		mDelayMs = delay_ms;
 		mDeviceId = device_id;
-		mComPort = com_port;
+		mSlideCfg = SerialConfig{};
+		mSlideCfg.port = slide_port;
+		mSlideAxisId = slide_axis_id;
+		mSlideTimeoutMs = slide_timeout_ms > 0 ? slide_timeout_ms : 20000;
+		mEnableGroupCapture = enable_group_capture;
 		if (!initDevice()) {
 			LOGE("init Fall");
 			return false;
 		}
-		if (!mComPort.empty()) {
-			if (!openSerial(mComPort)) {
-				LOGE("串口 %s 打开失败", mComPort.c_str());
+		if (!mSlideCfg.port.empty()) {
+			if (!openSlideSerial()) {
+				LOGE("滑台串口 %s 打开失败", mSlideCfg.port.c_str());
 			}
 			else {
-				LOGI("串口 %s 已连接", mComPort.c_str());
+				LOGI("滑台串口 %s 已连接", mSlideCfg.port.c_str());
 			}
 		}
 		g_queue_manager.start();
@@ -59,6 +68,7 @@ namespace XL {
 		}
 		mRunning.store(false, std::memory_order_relaxed);
 		g_queue_manager.stop();
+		closeSlideSerial();
 		cleanupDevice();
 	}
 
@@ -71,66 +81,61 @@ namespace XL {
 		LOGI("Allow next snap");
 	}
 
-	// ---------------- 串口实现 ----------------
+	// ---------------- 滑台串口实现 ----------------
 
-	bool CameraThread::openSerial(const std::string& portName) {
-#ifdef _WIN32
-		mSerialHandle = CreateFileA(portName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-		if (mSerialHandle == INVALID_HANDLE_VALUE) return false;
-
-		DCB dcb = { 0 };
-		dcb.DCBlength = sizeof(dcb);
-		if (!GetCommState(mSerialHandle, &dcb)) return false;
-
-		dcb.BaudRate = 115200;
-		dcb.ByteSize = 8;
-		dcb.StopBits = ONESTOPBIT;
-		dcb.Parity = NOPARITY;
-
-		if (!SetCommState(mSerialHandle, &dcb)) return false;
-
-		COMMTIMEOUTS timeouts = { 0 };
-		timeouts.ReadIntervalTimeout = 50;
-		timeouts.ReadTotalTimeoutConstant = 50;
-		timeouts.ReadTotalTimeoutMultiplier = 10;
-		SetCommTimeouts(mSerialHandle, &timeouts);
-		return true;
-#else
-		return false;
-#endif
+	bool CameraThread::openSlideSerial() {
+		if (mSlideCfg.port.empty()) return false;
+		return mSlide.Open(mSlideCfg);
 	}
 
-	void CameraThread::closeSerial() {
-#ifdef _WIN32
-		if (mSerialHandle != INVALID_HANDLE_VALUE) {
-			CloseHandle(mSerialHandle);
-			mSerialHandle = INVALID_HANDLE_VALUE;
+	void CameraThread::closeSlideSerial() {
+		mSlide.Close();
+	}
+
+	bool CameraThread::lineHasToken(const std::string& line, const std::string& token) {
+		if (token.empty()) return false;
+		return line.find(token) != std::string::npos;
+	}
+
+	void CameraThread::drainSlideLines() {
+		if (!mSlide.IsOpen()) return;
+		(void)mSlide.DrainLines();
+	}
+
+	bool CameraThread::sendSlideCommand(int dir, int steps, int dly) {
+		if (!mSlide.IsOpen()) return false;
+		std::string line = std::to_string(mSlideAxisId) + "," +
+			std::to_string(dir) + "," +
+			std::to_string(steps) + "," +
+			std::to_string(dly);
+		return mSlide.WriteLine(line);
+	}
+
+	bool CameraThread::waitSlideResponseAny(const std::vector<std::string>& tokens, int timeout_ms) {
+		if (!mSlide.IsOpen()) return false;
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+		while (!mStopRequested.load(std::memory_order_relaxed)) {
+			for (auto& line : mSlide.DrainLines()) {
+				if (lineHasToken(line, "Parse Err") || lineHasToken(line, "Bad Cmd") || lineHasToken(line, "Flow Busy")) {
+					LOGE("滑台返回错误: %s", line.c_str());
+					return false;
+				}
+				for (const auto& t : tokens) {
+					if (lineHasToken(line, t)) {
+						return true;
+					}
+				}
+			}
+			if (std::chrono::steady_clock::now() >= deadline) {
+				return false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
-#endif
-	}
-
-	bool CameraThread::sendSerialCommand(const std::string& cmd) {
-#ifdef _WIN32
-		if (mSerialHandle == INVALID_HANDLE_VALUE) return false;
-		std::string fullCmd = cmd + "\n";
-		DWORD written;
-		return WriteFile(mSerialHandle, fullCmd.c_str(), (DWORD)fullCmd.size(), &written, NULL);
-#else
 		return false;
-#endif
 	}
 
-	std::string CameraThread::readSerialResponse() {
-#ifdef _WIN32
-		if (mSerialHandle == INVALID_HANDLE_VALUE) return "";
-		char buf[128];
-		DWORD bytesRead;
-		if (ReadFile(mSerialHandle, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
-			buf[bytesRead] = '\0';
-			return std::string(buf);
-		}
-#endif
-		return "";
+	bool CameraThread::waitSlideResponse(const std::string& token, int timeout_ms) {
+		return waitSlideResponseAny({ token }, timeout_ms);
 	}
 
 	// 单张采集接口实现
@@ -284,12 +289,6 @@ namespace XL {
 							ImageFrame frame = captureSingleImageInternal(10000);
 							mSingleCapturePromise.set_value(std::move(frame));
 							LOGI("单张采集完成");
-
-							// 拍摄后旋转
-							if (mComPort != "" && sendSerialCommand("1,9,0,200")) {
-								readSerialResponse();
-								std::this_thread::sleep_for(std::chrono::milliseconds(500));
-							}
 						}
 						catch (const std::exception& e) {
 							mSingleCapturePromise.set_exception(std::current_exception());
@@ -301,6 +300,10 @@ namespace XL {
 				}
 			}
 
+			if (!mEnableGroupCapture) {
+				continue;
+			}
+
 			// 等待允许开启新的一组
 			{
 				std::unique_lock<std::mutex> lk(mAllowMtx);
@@ -310,6 +313,25 @@ namespace XL {
 				if (mStopRequested.load(std::memory_order_relaxed)) break;
 				// 消耗许可，防止下一次循环直接开始下一组
 				mAllowNextGroupFlag = false;
+			}
+
+			const bool slideEnabled = mSlide.IsOpen();
+			if (slideEnabled) {
+				drainSlideLines();
+				// 1) LOAD
+				if (!sendSlideCommand(20, 0, 0) || !waitSlideResponse("FLOW LOAD DONE", mSlideTimeoutMs)) {
+					LOGE("滑台 LOAD 流程失败");
+					allow_next_group();
+					std::this_thread::sleep_for(std::chrono::milliseconds(200));
+					continue;
+				}
+				// 2) GOTO_CAM
+				if (!sendSlideCommand(21, 0, 0) || !waitSlideResponse("FLOW GOTO_CAM DONE", mSlideTimeoutMs)) {
+					LOGE("滑台 GOTO_CAM 流程失败");
+					allow_next_group();
+					std::this_thread::sleep_for(std::chrono::milliseconds(200));
+					continue;
+				}
 			}
 
 			const std::uint64_t group_id = mGroupSeq++;
@@ -370,13 +392,22 @@ namespace XL {
 				if (g_queue_manager.pushRaw(std::move(frame))) {
 					LOGI("已入队: group=%llu, idx=%d", group_id, idx);
 
-					// 【关键点】自动组采集里的旋转指令
-					if (!mComPort.empty()) {
-						// 拍摄完一张，旋转一次
-						sendSerialCommand("1,9,0,200");
-						readSerialResponse(); 
-						// 延时等待物理转动完成
-						std::this_thread::sleep_for(std::chrono::milliseconds(300));
+					// 四面采集：拍一张 -> CAM_NEXT -> 拍下一张
+					if (slideEnabled) {
+						if (idx < static_cast<int>(kQuadImageCount) - 1) {
+							if (!sendSlideCommand(23, 0, 0) ||
+								!waitSlideResponseAny({ "Cam Next", "POS_DONE" }, mSlideTimeoutMs)) {
+								LOGE("滑台 CAM_NEXT 失败，group=%llu, idx=%d", group_id, idx);
+								break;
+							}
+						}
+						else {
+							// 最后一面完成后 UNLOAD
+							if (!sendSlideCommand(22, 0, 0) ||
+								!waitSlideResponse("FLOW UNLOAD DONE", mSlideTimeoutMs)) {
+								LOGE("滑台 UNLOAD 失败，group=%llu", group_id);
+							}
+						}
 					}
 					++idx;
 				}
