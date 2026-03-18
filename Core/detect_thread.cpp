@@ -220,14 +220,14 @@ namespace XL {
                     stream
                 );
             }
-            stream.waitForCompletion();
+            //stream.waitForCompletion();
 
 			// Halcon 处理器：中心点检测（直接传入GPU图像，并传递流以保证下载/同步在同一流上）
 			std::vector<std::pair<double, double>> centers;
 			bool halcon_ok = false;
 			try {
 				// 读取上传目录（config.json -> uploadDir），目录规则：uploadDir/YYYYMMDD_HHMMSS_groupid
-				halcon_ok = mHalcon.processImage(
+				halcon_ok = mHalcon.processImage( 
 					d_cropped,
 					skeleton_path,
 					centers,
@@ -266,8 +266,7 @@ namespace XL {
                 slices,
                 mParams.nms_threshold,
                 mParams.conf_threshold,
-                std::vector<int>{0, 2},
-                cv::cuda::StreamAccessor::getStream(stream)
+                std::vector<int>{0, 2}
             );
 
 			// 可视化并保存
@@ -317,9 +316,9 @@ namespace XL {
 
 			mHalcon.waitForAsyncOperations();
 
-            o_cropped.release();
-            d_cropped.release();
-            d_input.release();
+            // o_cropped.release();
+            // d_cropped.release();
+            // d_input.release();
             vis_cpu.release();
             slices.clear();
 

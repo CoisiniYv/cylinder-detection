@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/cuda.hpp>
 #include "trtyolo_slice.hpp"
@@ -59,7 +59,8 @@ public:
 		bool saveSlices = false,
 		const std::string& savePath = "",
 		int sliceWidth = 100,
-		int sliceHeight = 100
+		int sliceHeight = 100,
+		cv::cuda::Stream& stream = cv::cuda::Stream::Null()
 	);
 
 private:
@@ -84,13 +85,14 @@ private:
 	/**
 	 * @brief 使用GPU提取单个切片（在GPU上完成填充与复制），返回CPU Mat用于推理
 	 */
-	static SliceInfo extractSingleSliceGPU(
-		const cv::cuda::GpuMat& originalImageGPU,
-		double centerX,
-		double centerY,
-		int sliceWidth,
-		int sliceHeight
-	);
+    static SliceInfo extractSingleSliceGPU(
+        const cv::cuda::GpuMat& originalImageGPU,
+        double centerX,
+        double centerY,
+        int sliceWidth,
+        int sliceHeight,
+        cv::cuda::Stream& stream = cv::cuda::Stream::Null()
+    );
 
 	/**
 	 * @brief 保存切片图像

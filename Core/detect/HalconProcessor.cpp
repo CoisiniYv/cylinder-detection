@@ -1,4 +1,4 @@
-﻿#include <opencv2/opencv.hpp>
+#include <opencv2/opencv.hpp>
 #include "HalconProcessor.h"
 
 #include <iostream>
@@ -200,36 +200,38 @@ void HalconProcessor::asyncWorkerFunction()
 }
 
 bool HalconProcessor::performSaveOperation(const HalconCpp::HObject& image,
-	const HalconCpp::HObject& scratchesAndDots,
-	const std::string& outputPath)
+    const HalconCpp::HObject& scratchesAndDots,
+    const std::string& outputPath)
 {
-	try {
-		// 将缺陷区域用红色叠加到原始彩色图像上
-		HalconCpp::HObject ho_Red, ho_Green, ho_Blue;
-		HalconCpp::HObject ho_OverlayImage;
+    try {
+        HalconCpp::HObject ho_Red, ho_Green, ho_Blue;
+        HalconCpp::HObject ho_OverlayImage;
+        HalconCpp::HTuple channels;
+        HalconCpp::CountChannels(image, &channels);
+        if ((int)channels[0].I() == 3) {
+            HalconCpp::Decompose3(image, &ho_Red, &ho_Green, &ho_Blue);
+        }
+        else {
+            HalconCpp::HObject color_image;
+            HalconCpp::Compose3(image, image, image, &color_image);
+            HalconCpp::Decompose3(color_image, &ho_Red, &ho_Green, &ho_Blue);
+        }
 
-		HalconCpp::Decompose3(image, &ho_Red, &ho_Green, &ho_Blue);
+        if (scratchesAndDots.CountObj() > 0) {
+            HalconCpp::PaintRegion(scratchesAndDots, ho_Red, &ho_Red, 255, "fill");
+            HalconCpp::PaintRegion(scratchesAndDots, ho_Green, &ho_Green, 0, "fill");
+            HalconCpp::PaintRegion(scratchesAndDots, ho_Blue, &ho_Blue, 0, "fill");
+        }
 
-		// 在红色通道中绘制缺陷区域（设置为255）
-		if (scratchesAndDots.CountObj() > 0) {
-			HalconCpp::PaintRegion(scratchesAndDots, ho_Red, &ho_Red, 255, "fill");
-			// 在绿色和蓝色通道中清除缺陷区域（设置为0）
-			HalconCpp::PaintRegion(scratchesAndDots, ho_Green, &ho_Green, 0, "fill");
-			HalconCpp::PaintRegion(scratchesAndDots, ho_Blue, &ho_Blue, 0, "fill");
-		}
+        HalconCpp::Compose3(ho_Red, ho_Green, ho_Blue, &ho_OverlayImage);
+        HalconCpp::WriteImage(ho_OverlayImage, "png", 0, outputPath.c_str());
 
-		// 重新组合三通道图像
-		HalconCpp::Compose3(ho_Red, ho_Green, ho_Blue, &ho_OverlayImage);
-
-		// 保存叠加图像
-		HalconCpp::WriteImage(ho_OverlayImage, "png", 0, outputPath.c_str());
-
-		return true;
-	}
-	catch (const HalconCpp::HException& e) {
-		std::cerr << "HALCON Error in async saveOverlayImage: " << e.ErrorMessage().TextA() << std::endl;
-		return false;
-	}
+        return true;
+    }
+    catch (const HalconCpp::HException& e) {
+        std::cerr << "HALCON Error in async saveOverlayImage: " << e.ErrorMessage().TextA() << std::endl;
+        return false;
+    }
 	catch (const std::exception& e) {
 		std::cerr << "Standard exception in async saveOverlayImage: " << e.what() << std::endl;
 		return false;
@@ -360,14 +362,14 @@ bool HalconProcessor::processImage(const cv::cuda::GpuMat& inputImage,
 		HalconCpp::DilationCircle(ho_RegionOverlap1, &ho_RegionDilated, 4);
 		HalconCpp::ErosionCircle(ho_RegionDilated, &ho_RegionEroded, 2);
 		HalconCpp::Connection(ho_RegionEroded, &ho_ConnectedRegions);
-		HalconCpp::SelectShape(ho_ConnectedRegions, &ho_FinalDefects, "area", "and", 100, 999999);
+		HalconCpp::SelectShape(ho_ConnectedRegions, &ho_FinalDefects, "area", "and", 100, 2000);
 		HalconCpp::ConcatObj(ho_ImageVTexture, ho_ImageHTexture, &ho_ObjectsConcat);
 
 		HalconCpp::MultImage(ho_ImageHTexture, ho_ImageVTexture, &ho_MultipliedImage, 0.1, 0);
 		HalconCpp::ScaleImage(ho_ImageVTexture, &ho_EnhancedImage, 3, 0);
 		HalconCpp::Threshold(ho_EnhancedImage, &ho_BrightRegions, 128, 255);
 		HalconCpp::Connection(ho_BrightRegions, &ho_ConnectedRegions1);
-		HalconCpp::SelectShape(ho_ConnectedRegions1, &ho_FinalRegions, "area", "and", 100, 99999);
+		HalconCpp::SelectShape(ho_ConnectedRegions1, &ho_FinalRegions, "area", "and", 100, 2000);
 		HalconCpp::Connection(ho_FinalRegions, &ho_ConnectedRegions1);
 
 		HalconCpp::CountObj(ho_FinalRegions, &hv_NumberScratchesAndDots);

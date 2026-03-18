@@ -16,16 +16,23 @@ namespace XL {
 		cleanupDevice();
 	}
 
-	bool CameraThread::start(int delay_ms, const std::string& device_id) {
+	bool CameraThread::start(int delay_ms, const std::string& device_id, const std::string& com_port) {
 		if (isRunning()) return true;
 		mDelayMs = delay_ms;
 		mDeviceId = device_id;
-
-			if (!initDevice()) {
-				LOGE("init Fall");
-				return false;
-	}
-
+		mComPort = com_port;
+		if (!initDevice()) {
+			LOGE("init Fall");
+			return false;
+		}
+		if (!mComPort.empty()) {
+			if (!openSerial(mComPort)) {
+				LOGE("串口 %s 打开失败", mComPort.c_str());
+			}
+			else {
+				LOGI("串口 %s 已连接", mComPort.c_str());
+			}
+		}
 		g_queue_manager.start();
 
 		mStopRequested.store(false, std::memory_order_relaxed);
@@ -62,6 +69,68 @@ namespace XL {
 		}
 		mAllowCv.notify_one();
 		LOGI("Allow next snap");
+	}
+
+	// ---------------- 串口实现 ----------------
+
+	bool CameraThread::openSerial(const std::string& portName) {
+#ifdef _WIN32
+		mSerialHandle = CreateFileA(portName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (mSerialHandle == INVALID_HANDLE_VALUE) return false;
+
+		DCB dcb = { 0 };
+		dcb.DCBlength = sizeof(dcb);
+		if (!GetCommState(mSerialHandle, &dcb)) return false;
+
+		dcb.BaudRate = 115200;
+		dcb.ByteSize = 8;
+		dcb.StopBits = ONESTOPBIT;
+		dcb.Parity = NOPARITY;
+
+		if (!SetCommState(mSerialHandle, &dcb)) return false;
+
+		COMMTIMEOUTS timeouts = { 0 };
+		timeouts.ReadIntervalTimeout = 50;
+		timeouts.ReadTotalTimeoutConstant = 50;
+		timeouts.ReadTotalTimeoutMultiplier = 10;
+		SetCommTimeouts(mSerialHandle, &timeouts);
+		return true;
+#else
+		return false;
+#endif
+	}
+
+	void CameraThread::closeSerial() {
+#ifdef _WIN32
+		if (mSerialHandle != INVALID_HANDLE_VALUE) {
+			CloseHandle(mSerialHandle);
+			mSerialHandle = INVALID_HANDLE_VALUE;
+		}
+#endif
+	}
+
+	bool CameraThread::sendSerialCommand(const std::string& cmd) {
+#ifdef _WIN32
+		if (mSerialHandle == INVALID_HANDLE_VALUE) return false;
+		std::string fullCmd = cmd + "\n";
+		DWORD written;
+		return WriteFile(mSerialHandle, fullCmd.c_str(), (DWORD)fullCmd.size(), &written, NULL);
+#else
+		return false;
+#endif
+	}
+
+	std::string CameraThread::readSerialResponse() {
+#ifdef _WIN32
+		if (mSerialHandle == INVALID_HANDLE_VALUE) return "";
+		char buf[128];
+		DWORD bytesRead;
+		if (ReadFile(mSerialHandle, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
+			buf[bytesRead] = '\0';
+			return std::string(buf);
+		}
+#endif
+		return "";
 	}
 
 	// 单张采集接口实现
@@ -215,6 +284,12 @@ namespace XL {
 							ImageFrame frame = captureSingleImageInternal(10000);
 							mSingleCapturePromise.set_value(std::move(frame));
 							LOGI("单张采集完成");
+
+							// 拍摄后旋转
+							if (mComPort != "" && sendSerialCommand("1,9,0,200")) {
+								readSerialResponse();
+								std::this_thread::sleep_for(std::chrono::milliseconds(500));
+							}
 						}
 						catch (const std::exception& e) {
 							mSingleCapturePromise.set_exception(std::current_exception());
@@ -284,14 +359,27 @@ namespace XL {
 				frame.meta.group_id = group_id;
 				frame.meta.index_in_group = idx;
 
-				if (!g_queue_manager.pushRaw(std::move(frame))) {
-					LOGE("pushRaw 失败（队列可能已停止）");
-					break;
+				//if (!g_queue_manager.pushRaw(std::move(frame))) {
+				//	LOGE("pushRaw 失败（队列可能已停止）");
+				//	break;
+				//}
+
+				//LOGI("已入队：group=%llu, idx=%d", group_id, idx);
+
+				//++idx; // 成功后才递增到下一张
+				if (g_queue_manager.pushRaw(std::move(frame))) {
+					LOGI("已入队: group=%llu, idx=%d", group_id, idx);
+
+					// 【关键点】自动组采集里的旋转指令
+					if (!mComPort.empty()) {
+						// 拍摄完一张，旋转一次
+						sendSerialCommand("1,9,0,200");
+						readSerialResponse(); 
+						// 延时等待物理转动完成
+						std::this_thread::sleep_for(std::chrono::milliseconds(300));
+					}
+					++idx;
 				}
-
-				LOGI("已入队：group=%llu, idx=%d", group_id, idx);
-
-				++idx; // 成功后才递增到下一张
 				if (mDelayMs > 0) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(mDelayMs));
 				}

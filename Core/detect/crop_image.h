@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <opencv2/core/cuda.hpp>
 #include <string>
@@ -33,28 +33,29 @@
  * @return cv::cuda::GpuMat 裁剪后的图像
  */
 cv::cuda::GpuMat cropImage(
-	const cv::cuda::GpuMat& d_imageInput,
-	bool enableFourSideCrop = false,
-	int x = 0,
-	int y = 0,
-	int width = 0,
-	int height = 0,
-	bool isQw = false,
-	int x1Circle = 0,
-	int y1Circle = 0,
-	int x2Circle = 0,
-	int y2Circle = 0,
-	int radius = 0,
-	const std::string& fileName = "cropped_image",
-	const std::string& outputDir = "",
-	bool enableFourierTransform = false,
-	int filter_width = 10,
-	double attenuation_factor = 0.5,
-	int target_angle = 90,
-	int angle_tolerance = 15,
-	bool enable_denoising = false,
-	float denoise_h = 3.0f,
-	float denoise_hColor = 3.0f,
-	int denoise_searchWindowSize = 21,
-	int denoise_templateWindowSize = 7
+    const cv::cuda::GpuMat& d_imageInput,
+    bool enableFourSideCrop = false,
+    int x = 0,
+    int y = 0,
+    int width = 0,
+    int height = 0,
+    bool isQw = false,
+    int x1Circle = 0,
+    int y1Circle = 0,
+    int x2Circle = 0,
+    int y2Circle = 0,
+    int radius = 0,
+    const std::string& fileName = "cropped_image",
+    const std::string& outputDir = "",
+    bool enableFourierTransform = false,
+    int filter_width = 10,
+    double attenuation_factor = 0.5,
+    int target_angle = 90,
+    int angle_tolerance = 15,
+    bool enable_denoising = false,
+    float denoise_h = 3.0f,
+    float denoise_hColor = 3.0f,
+    int denoise_searchWindowSize = 21,
+    int denoise_templateWindowSize = 7,
+    cv::cuda::Stream& stream = cv::cuda::Stream::Null()
 );

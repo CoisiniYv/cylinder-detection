@@ -1,14 +1,14 @@
-﻿#include "crop_image.h"
+#include "crop_image.h"
 #include "StripeRemoval.h"
 
 #include <stdexcept>
 
 cv::cuda::GpuMat cropImage(
-	const cv::cuda::GpuMat& d_imageInput,
-	bool enableFourSideCrop,
-	int x,
-	int y,
-	int width,
+    const cv::cuda::GpuMat& d_imageInput,
+    bool enableFourSideCrop,
+    int x,
+    int y,
+    int width,
 	int height,
 	bool isQw,
 	int x1Circle,
@@ -26,8 +26,9 @@ cv::cuda::GpuMat cropImage(
 	bool enable_denoising,
 	float denoise_h,
 	float denoise_hColor,
-	int denoise_searchWindowSize,
-	int denoise_templateWindowSize)
+    int denoise_searchWindowSize,
+    int denoise_templateWindowSize,
+    cv::cuda::Stream& stream)
 {
 	// 输入检查
 	if (d_imageInput.empty()) {
@@ -39,18 +40,18 @@ cv::cuda::GpuMat cropImage(
 
 	cv::cuda::GpuMat d_cropped;
 
-	if (enableFourSideCrop) {
-		if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
-			(x + width) > imgCols || (y + height) > imgRows) {
-			throw std::out_of_range("裁剪区域超出图像范围");
-		}
-		// 直接在GPU上构建ROI视图然后拷贝出独立矩阵
-		cv::Rect roi(x, y, width, height);
-		d_cropped = cv::cuda::GpuMat(d_imageInput, roi).clone();
-	}
-	else {
-		d_cropped = d_imageInput.clone();
-	}
+    if (enableFourSideCrop) {
+        if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
+            (x + width) > imgCols || (y + height) > imgRows) {
+            throw std::out_of_range("裁剪区域超出图像范围");
+        }
+        cv::Rect roi(x, y, width, height);
+        cv::cuda::GpuMat roi_view(d_imageInput, roi);
+        roi_view.copyTo(d_cropped, stream);
+    }
+    else {
+        d_imageInput.copyTo(d_cropped, stream);
+    }
 
 	// 傅里叶条纹去除
 	if (enableFourierTransform) {
@@ -66,7 +67,8 @@ cv::cuda::GpuMat cropImage(
 			denoise_h,       // denoise_h
 			denoise_hColor,  // denoise_hColor
 			denoise_searchWindowSize, // denoise_searchWindowSize
-			denoise_templateWindowSize  // denoise_templateWindowSize
+			denoise_templateWindowSize,
+			stream
 		);
 	}
 
@@ -86,42 +88,42 @@ cv::cuda::GpuMat cropImage(
 		cv::circle(mask, cv::Point(leftCenterX, leftCenterY), radius, cv::Scalar(0), -1);
 		cv::circle(mask, cv::Point(rightCenterX, rightCenterY), radius, cv::Scalar(0), -1);
 
-		cv::cuda::GpuMat d_mask;
-		d_mask.upload(mask);
+        cv::cuda::GpuMat d_mask;
+        d_mask.upload(mask, stream);
 
 		// 根据图像通道数扩展掩模并进行乘法
 		cv::cuda::GpuMat d_mask_f;
-		d_mask.convertTo(d_mask_f, CV_32F, 1.0 / 255.0);
+        d_mask.convertTo(d_mask_f, CV_32F, 1.0 / 255.0, 0.0, stream);
 
 		int ch = d_cropped.channels();
 		int float_type = CV_MAKETYPE(CV_32F, ch);
-		cv::cuda::GpuMat d_cropped_f;
-		d_cropped.convertTo(d_cropped_f, float_type);
+        cv::cuda::GpuMat d_cropped_f;
+        d_cropped.convertTo(d_cropped_f, float_type, 1.0, 0.0, stream);
 
-		if (ch == 1) {
-			cv::cuda::multiply(d_cropped_f, d_mask_f, d_cropped_f);
-		}
-		else {
-			std::vector<cv::cuda::GpuMat> channelsMask(ch, d_mask_f);
-			cv::cuda::GpuMat d_mask_fN;
-			cv::cuda::merge(channelsMask, d_mask_fN);
-			cv::cuda::multiply(d_cropped_f, d_mask_fN, d_cropped_f);
-		}
+        if (ch == 1) {
+            cv::cuda::multiply(d_cropped_f, d_mask_f, d_cropped_f, 1.0, -1, stream);
+        }
+        else {
+            std::vector<cv::cuda::GpuMat> channelsMask(ch, d_mask_f);
+            cv::cuda::GpuMat d_mask_fN;
+            cv::cuda::merge(channelsMask, d_mask_fN, stream);
+            cv::cuda::multiply(d_cropped_f, d_mask_fN, d_cropped_f, 1.0, -1, stream);
+        }
 
-		d_cropped_f.convertTo(d_cropped, d_cropped.type());
-	}
+        d_cropped_f.convertTo(d_cropped, d_cropped.type(), 1.0, 0.0, stream);
+    }
 
 	// 保存到磁盘（如需要）
-	if (!outputDir.empty()) {
-		std::filesystem::path outputPath(outputDir);
-		if (!std::filesystem::exists(outputPath)) {
-			std::filesystem::create_directories(outputPath);
-		}
-		std::string fullOutputPath = (outputPath / (fileName + ".png")).string();
-		cv::Mat h_output;
-		d_cropped.download(h_output);
-		cv::imwrite(fullOutputPath, h_output);
-	}
+    if (!outputDir.empty()) {
+        std::filesystem::path outputPath(outputDir);
+        if (!std::filesystem::exists(outputPath)) {
+            std::filesystem::create_directories(outputPath);
+        }
+        std::string fullOutputPath = (outputPath / (fileName + ".png")).string();
+        cv::Mat h_output;
+        d_cropped.download(h_output, stream);
+        cv::imwrite(fullOutputPath, h_output);
+    }
 
 	return d_cropped;
 }

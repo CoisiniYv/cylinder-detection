@@ -1,4 +1,4 @@
-﻿#include "StripeRemoval.h"
+#include "StripeRemoval.h"
 
 #include <limits>
 
@@ -116,16 +116,17 @@ int StripeRemoval::detect_strongest_direction(const cv::cuda::GpuMat& d_magnitud
 }
 
 cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_image,
-	const std::string& output_path,
-	int filter_width,
-	double attenuation_factor,
-	int target_angle,
-	int angle_tolerance,
-	bool enable_denoising,
-	float denoise_h,
-	float denoise_hColor,
-	int denoise_searchWindowSize,
-	int denoise_templateWindowSize) {
+    const std::string& output_path,
+    int filter_width,
+    double attenuation_factor,
+    int target_angle,
+    int angle_tolerance,
+    bool enable_denoising,
+    float denoise_h,
+    float denoise_hColor,
+    int denoise_searchWindowSize,
+    int denoise_templateWindowSize,
+    cv::cuda::Stream& stream) {
 
 	auto total_start_time = std::chrono::high_resolution_clock::now();
 	this->filter_width = filter_width;
@@ -137,24 +138,24 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 		if (d_src.empty()) {
 			throw std::runtime_error("Input GpuMat is empty");
 		}
-		if (d_src.channels() == 1) {
-			cv::cuda::GpuMat d_tmp;
-			cv::cuda::cvtColor(d_src, d_tmp, cv::COLOR_GRAY2BGR);
-			d_src = d_tmp;
-		}
-		else if (d_src.channels() == 4) {
-			cv::cuda::GpuMat d_tmp;
-			cv::cuda::cvtColor(d_src, d_tmp, cv::COLOR_BGRA2BGR);
-			d_src = d_tmp;
-		}
+        if (d_src.channels() == 1) {
+            cv::cuda::GpuMat d_tmp;
+            cv::cuda::cvtColor(d_src, d_tmp, cv::COLOR_GRAY2BGR, 0, stream);
+            d_src = d_tmp;
+        }
+        else if (d_src.channels() == 4) {
+            cv::cuda::GpuMat d_tmp;
+            cv::cuda::cvtColor(d_src, d_tmp, cv::COLOR_BGRA2BGR, 0, stream);
+            d_src = d_tmp;
+        }
 
 		// 转换到32F以进行频域处理
 		cv::cuda::GpuMat d_src_f32;
-		d_src.convertTo(d_src_f32, CV_32FC3);
+        d_src.convertTo(d_src_f32, CV_32FC3, 1.0, 0.0, stream);
 
 		// 拆分通道
 		std::vector<cv::cuda::GpuMat> d_channels;
-		cv::cuda::split(d_src_f32, d_channels);
+        cv::cuda::split(d_src_f32, d_channels, stream);
 
 		std::vector<cv::cuda::GpuMat> d_real_parts(d_channels.size());
 		std::vector<cv::cuda::GpuMat> d_imag_parts(d_channels.size());
@@ -171,24 +172,24 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 			padded_size = cv::Size(n, m);
 
 			cv::cuda::GpuMat d_padded(m, n, CV_32F);
-			d_padded.setTo(cv::Scalar::all(0));
+            d_padded.setTo(cv::Scalar::all(0), stream);
 			cv::Rect roi(0, 0, d_channel.cols, d_channel.rows);
-			d_channel.copyTo(d_padded(roi));
+            d_channel.copyTo(d_padded(roi), stream);
 
 			// 创建复数矩阵（实部+虚部）
 			cv::cuda::GpuMat d_planes[2];
-			d_planes[0] = d_padded.clone();
-			d_planes[1].create(m, n, CV_32F);
-			d_planes[1].setTo(cv::Scalar::all(0));
+            d_padded.copyTo(d_planes[0], stream);
+            d_planes[1].create(m, n, CV_32F);
+            d_planes[1].setTo(cv::Scalar::all(0), stream);
 
 			cv::cuda::GpuMat d_complexI;
-			cv::cuda::merge(d_planes, 2, d_complexI);
+            cv::cuda::merge(d_planes, 2, d_complexI, stream);
 
 			// 执行GPU版DFT
-			cv::cuda::dft(d_complexI, d_complexI, d_complexI.size());
+            cv::cuda::dft(d_complexI, d_complexI, d_complexI.size(), 0, stream);
 
 			// 分离实部和虚部
-			cv::cuda::split(d_complexI, d_planes);
+            cv::cuda::split(d_complexI, d_planes, stream);
 			cv::cuda::GpuMat d_real_part = d_planes[0];
 			cv::cuda::GpuMat d_imag_part = d_planes[1];
 
@@ -207,20 +208,20 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 			cv::cuda::GpuMat q3_imag(d_imag_part, cv::Rect(cx, cy, cx, cy));
 
 			cv::cuda::GpuMat tmp_real, tmp_imag;
-			q0_real.copyTo(tmp_real); q0_imag.copyTo(tmp_imag);
-			q3_real.copyTo(q0_real); q3_imag.copyTo(q0_imag);
-			tmp_real.copyTo(q3_real); tmp_imag.copyTo(q3_imag);
+            q0_real.copyTo(tmp_real, stream); q0_imag.copyTo(tmp_imag, stream);
+            q3_real.copyTo(q0_real, stream); q3_imag.copyTo(q0_imag, stream);
+            tmp_real.copyTo(q3_real, stream); tmp_imag.copyTo(q3_imag, stream);
 
-			q1_real.copyTo(tmp_real); q1_imag.copyTo(tmp_imag);
-			q2_real.copyTo(q1_real); q2_imag.copyTo(q1_imag);
-			tmp_real.copyTo(q2_real); tmp_imag.copyTo(q2_imag);
+            q1_real.copyTo(tmp_real, stream); q1_imag.copyTo(tmp_imag, stream);
+            q2_real.copyTo(q1_real, stream); q2_imag.copyTo(q1_imag, stream);
+            tmp_real.copyTo(q2_real, stream); tmp_imag.copyTo(q2_imag, stream);
 
-			d_real_parts[c] = d_real_part.clone();
-			d_imag_parts[c] = d_imag_part.clone();
+            d_real_part.copyTo(d_real_parts[c], stream);
+            d_imag_part.copyTo(d_imag_parts[c], stream);
 
 			// 第一个通道计算幅度谱用于方向检测（保留在GPU）
 			if (c == 0) {
-				cv::cuda::magnitude(d_real_part, d_imag_part, d_magnitude_spectrum);
+                cv::cuda::magnitude(d_real_part, d_imag_part, d_magnitude_spectrum, stream);
 			}
 		}
 
@@ -246,7 +247,7 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 			}
 		}
 		cv::cuda::GpuMat d_mask;
-		d_mask.upload(mask);
+        d_mask.upload(mask, stream);
 
 		// 应用掩模并逆中心化、逆变换
 		std::vector<cv::cuda::GpuMat> d_processed_channels(d_channels.size());
@@ -254,8 +255,8 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 			cv::cuda::GpuMat d_real = d_real_parts[c];
 			cv::cuda::GpuMat d_imag = d_imag_parts[c];
 
-			cv::cuda::multiply(d_real, d_mask, d_real);
-			cv::cuda::multiply(d_imag, d_mask, d_imag);
+            cv::cuda::multiply(d_real, d_mask, d_real, 1.0, -1, stream);
+            cv::cuda::multiply(d_imag, d_mask, d_imag, 1.0, -1, stream);
 
 			// 逆中心化
 			int cx = d_real.cols / 2;
@@ -271,44 +272,44 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 			cv::cuda::GpuMat q3_imag(d_imag, cv::Rect(cx, cy, cx, cy));
 
 			cv::cuda::GpuMat tmp_real, tmp_imag;
-			q0_real.copyTo(tmp_real); q0_imag.copyTo(tmp_imag);
-			q3_real.copyTo(q0_real); q3_imag.copyTo(q0_imag);
-			tmp_real.copyTo(q3_real); tmp_imag.copyTo(q3_imag);
+            q0_real.copyTo(tmp_real, stream); q0_imag.copyTo(tmp_imag, stream);
+            q3_real.copyTo(q0_real, stream); q3_imag.copyTo(q0_imag, stream);
+            tmp_real.copyTo(q3_real, stream); tmp_imag.copyTo(q3_imag, stream);
 
-			q1_real.copyTo(tmp_real); q1_imag.copyTo(tmp_imag);
-			q2_real.copyTo(q1_real); q2_imag.copyTo(q1_imag);
-			tmp_real.copyTo(q2_real); tmp_imag.copyTo(q2_imag);
+            q1_real.copyTo(tmp_real, stream); q1_imag.copyTo(tmp_imag, stream);
+            q2_real.copyTo(q1_real, stream); q2_imag.copyTo(q1_imag, stream);
+            tmp_real.copyTo(q2_real, stream); tmp_imag.copyTo(q2_imag, stream);
 
 			// 合并并逆DFT
 			cv::cuda::GpuMat d_filtered_planes[2]{ d_real, d_imag };
 			cv::cuda::GpuMat d_complex_filtered;
-			cv::cuda::merge(d_filtered_planes, 2, d_complex_filtered);
+            cv::cuda::merge(d_filtered_planes, 2, d_complex_filtered, stream);
 
 			cv::cuda::GpuMat d_inverse_complex;
-			cv::cuda::dft(d_complex_filtered, d_inverse_complex, d_complex_filtered.size(), cv::DFT_INVERSE | cv::DFT_SCALE);
+            cv::cuda::dft(d_complex_filtered, d_inverse_complex, d_complex_filtered.size(), cv::DFT_INVERSE | cv::DFT_SCALE, stream);
 
 			// 取实部作为时域结果
 			cv::cuda::GpuMat d_time_planes[2];
-			cv::cuda::split(d_inverse_complex, d_time_planes);
+            cv::cuda::split(d_inverse_complex, d_time_planes, stream);
 			cv::cuda::GpuMat d_time = d_time_planes[0];
 
 			// 裁剪到原始大小并阈值到非负
 			cv::cuda::GpuMat d_processed = d_time(cv::Rect(0, 0, d_channels[c].cols, d_channels[c].rows));
-			cv::cuda::max(d_processed, 0.0, d_processed);
-			d_processed_channels[c] = d_processed.clone();
+            cv::cuda::max(d_processed, 0.0, d_processed, stream);
+            d_processed.copyTo(d_processed_channels[c], stream);
 		}
 
 		// 合并通道并转换到8U
 		cv::cuda::GpuMat d_processed_image;
-		cv::cuda::merge(d_processed_channels, d_processed_image);
+        cv::cuda::merge(d_processed_channels, d_processed_image, stream);
 		cv::cuda::GpuMat d_output_u8;
-		d_processed_image.convertTo(d_output_u8, CV_8UC3);
+        d_processed_image.convertTo(d_output_u8, CV_8UC3, 1.0, 0.0, stream);
 
 		// 非局部均值去噪
 		cv::cuda::GpuMat d_final;
-		if (enable_denoising) {
-			cv::cuda::fastNlMeansDenoisingColored(d_output_u8, d_final, denoise_h, denoise_hColor, denoise_searchWindowSize, denoise_templateWindowSize);
-		}
+        if (enable_denoising) {
+            cv::cuda::fastNlMeansDenoisingColored(d_output_u8, d_final, denoise_h, denoise_hColor, denoise_searchWindowSize, denoise_templateWindowSize, stream);
+        }
 		else {
 			d_final = d_output_u8;
 		}
@@ -317,7 +318,7 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
 		if (!output_path.empty()) {
 			std::filesystem::create_directories(std::filesystem::path(output_path).parent_path());
 			cv::Mat out_cpu;
-			d_final.download(out_cpu);
+            d_final.download(out_cpu, stream);
 			if (!cv::imwrite(output_path, out_cpu)) {
 				throw std::runtime_error("Failed to save processed image to: " + output_path);
 			}

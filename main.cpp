@@ -9,6 +9,7 @@
 using namespace XL;
 
 int main(int argc, char** argv) {
+
     try {
         const char* cfg_file = nullptr;
 
@@ -76,10 +77,6 @@ int main(int argc, char** argv) {
     }
     catch (const std::exception& e) {
         std::cerr << "程序执行出错: " << e.what() << std::endl;
-        return -1;
-    }
-    catch (...) {
-        std::cerr << "程序执行出错: 未知异常" << std::endl;
         return -1;
     }
 }

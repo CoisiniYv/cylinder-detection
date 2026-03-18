@@ -1,4 +1,4 @@
-﻿#include <opencv2/opencv.hpp>
+#include <opencv2/opencv.hpp>
 #include <opencv2/core/cuda.hpp>
 #include "Slice.h"
 
@@ -7,13 +7,13 @@
 #include <filesystem>
 
 std::vector<SliceInfo> ImageSlicer::extractSlices(
-	const cv::Mat& originalImage,
-	const std::vector<std::pair<double, double>>& centerPoints,
-	int distance,
-	bool saveSlices,
-	const std::string& savePath,
-	int sliceWidth,
-	int sliceHeight) {
+    const cv::Mat& originalImage,
+    const std::vector<std::pair<double, double>>& centerPoints,
+    int distance,
+    bool saveSlices,
+    const std::string& savePath,
+    int sliceWidth,
+    int sliceHeight) {
 
 	std::vector<SliceInfo> slices;
 	// 预留容量，避免多次扩容
@@ -157,13 +157,14 @@ void ImageSlicer::saveSliceImage(const cv::Mat& slice, const std::string& savePa
 }
 
 std::vector<SliceInfo> ImageSlicer::extractSlicesGPU(
-	const cv::cuda::GpuMat& originalImageGPU,
-	const std::vector<std::pair<double, double>>& centerPoints,
-	int distance,
-	bool saveSlices,
-	const std::string& savePath,
-	int sliceWidth,
-	int sliceHeight) {
+    const cv::cuda::GpuMat& originalImageGPU,
+    const std::vector<std::pair<double, double>>& centerPoints,
+    int distance,
+    bool saveSlices,
+    const std::string& savePath,
+    int sliceWidth,
+    int sliceHeight,
+    cv::cuda::Stream& stream) {
 
 	std::vector<SliceInfo> slices;
 	slices.reserve(centerPoints.size() * 5);
@@ -193,14 +194,14 @@ std::vector<SliceInfo> ImageSlicer::extractSlicesGPU(
 		double centerY = center.second;
 
 		// 中心点
-		SliceInfo centerSlice = extractSingleSliceGPU(originalImageGPU, centerX, centerY, sliceWidth, sliceHeight);
+        SliceInfo centerSlice = extractSingleSliceGPU(originalImageGPU, centerX, centerY, sliceWidth, sliceHeight, stream);
 		slices.emplace_back(std::move(centerSlice));
 
 		// 上下左右
-		slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX, centerY - distance, sliceWidth, sliceHeight));
-		slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX, centerY + distance, sliceWidth, sliceHeight));
-		slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX - distance, centerY, sliceWidth, sliceHeight));
-		slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX + distance, centerY, sliceWidth, sliceHeight));
+        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX, centerY - distance, sliceWidth, sliceHeight, stream));
+        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX, centerY + distance, sliceWidth, sliceHeight, stream));
+        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX - distance, centerY, sliceWidth, sliceHeight, stream));
+        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX + distance, centerY, sliceWidth, sliceHeight, stream));
 
 		// 保存切片（如果需要）
 		if (saveSlices) {
@@ -220,7 +221,8 @@ SliceInfo ImageSlicer::extractSingleSliceGPU(
 	double centerX,
 	double centerY,
 	int sliceWidth,
-	int sliceHeight) {
+    int sliceHeight,
+    cv::cuda::Stream& stream) {
 
 	int imgWidth = originalImageGPU.cols;
 	int imgHeight = originalImageGPU.rows;
@@ -233,7 +235,7 @@ SliceInfo ImageSlicer::extractSingleSliceGPU(
 
 	// 在GPU上创建黑色背景的切片
 	cv::cuda::GpuMat sliceGPU(sliceHeight, sliceWidth, originalImageGPU.type());
-	sliceGPU.setTo(cv::Scalar::all(0));
+    sliceGPU.setTo(cv::Scalar::all(0), stream);
 
 	// 计算原图中实际可用的区域
 	int roiStartX = std::max(startX, 0);
@@ -257,11 +259,11 @@ SliceInfo ImageSlicer::extractSingleSliceGPU(
 		cv::Rect dstROI(sliceStartX, sliceStartY, roiW, roiH);
 		cv::cuda::GpuMat srcRegion(originalImageGPU, srcROI);
 		cv::cuda::GpuMat dstRegion(sliceGPU, dstROI);
-		srcRegion.copyTo(dstRegion);
+    srcRegion.copyTo(dstRegion, stream);
 	}
 
 	// 下载到CPU以供后续推理使用
 	cv::Mat slice;
-	sliceGPU.download(slice);
+    sliceGPU.download(slice, stream);
 	return SliceInfo(slice, cv::Point(startX, startY));
 }

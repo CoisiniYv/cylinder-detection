@@ -4,6 +4,8 @@
 #include <fstream>
 #include <algorithm>
 #include <json/json.h>
+#include "Utils/Common.hpp"
+#include "db_utils.hpp"
 
 
 namespace XL {
@@ -180,7 +182,7 @@ namespace XL {
 			XL::g_camera_thread = std::make_shared<CameraThread>();
 		}
 		if (!XL::g_camera_thread->isRunning()) {
-			if (!XL::g_camera_thread->start(mParams.delay_ms, /*device_id*/mParams.device_id)) {
+			if (!XL::g_camera_thread->start(mParams.delay_ms, /*device_id*/mParams.device_id,"\\\\.\\COM17")) {
 				LOGE("CameraThread 启动失败，停止调度器");
 				g_queue_manager.stop();
 				return false;
@@ -202,7 +204,10 @@ namespace XL {
 		const std::string dbfile = (g_server_state.config && !g_server_state.config->dbPath.empty())
 			? g_server_state.config->dbPath
 			: std::string("my_inspection.db");
-		const std::string run_id = g_server_state.run_id;
+		// 每次启动生成新的批次ID（run_id），并注册到数据库
+		const std::string run_id = std::string("run_") + XL::getCurFormatTimeStr("%Y%m%d_%H%M%S");
+		g_server_state.run_id = run_id;
+		XL::register_run(dbfile, run_id);
 
 		// 创建并启动组管理线程
 		mGroupMgr = std::make_unique<GroupManager>();

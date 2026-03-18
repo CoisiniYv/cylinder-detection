@@ -16,11 +16,17 @@
     <Filter Include="源文件\Core">
       <UniqueIdentifier>{debf6404-3cc1-4fcd-80c6-60ec47abd02b}</UniqueIdentifier>
     </Filter>
-    <Filter Include="源文件\Core\Utils">
+    <Filter Include="头文件\Core">
+      <UniqueIdentifier>{a3fc981e-f2a2-496a-b6cd-d0023bee4e53}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Core\Utils">
       <UniqueIdentifier>{27405e76-4ab6-43a5-acf7-96c4e30d1a0d}</UniqueIdentifier>
     </Filter>
-    <Filter Include="源文件\Core\detect">
+    <Filter Include="源文件\Core\Detect">
       <UniqueIdentifier>{f2e6c384-03d7-4f9d-9dd3-6a3b063b4585}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Core\Detect">
+      <UniqueIdentifier>{e42e168b-f0e7-485f-a5be-fb4d6c82419a}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -36,6 +42,9 @@
     <ClCompile Include="Core\camera_thread.cpp">
       <Filter>源文件\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\single_detect_thread.cpp">
+      <Filter>源文件\Core</Filter>
+    </ClCompile>
     <ClCompile Include="Core\detect_thread.cpp">
       <Filter>源文件\Core</Filter>
     </ClCompile>
@@ -43,28 +52,28 @@
       <Filter>源文件\Core</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\crop_image.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\engineTRT.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\HalconProcessor.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\Slice.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\speedSam.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\StripeRemoval.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\trtyolo_slice.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\detect\sam.cpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>源文件\Core\Detect</Filter>
     </ClCompile>
     <ClCompile Include="Core\group_manager.cpp">
       <Filter>源文件\Core</Filter>
@@ -81,81 +90,82 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core\Utils\Log.hpp">
-      <Filter>源文件\Core\Utils</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\Config.hpp">
-      <Filter>源文件\Core</Filter>
+      <Filter>头文件\Core\Utils</Filter>
     </ClInclude>
     <ClInclude Include="Core\Utils\Common.hpp">
-      <Filter>源文件\Core\Utils</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\image_types.hpp">
-      <Filter>源文件\Core</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\queue_manager.hpp">
-      <Filter>源文件\Core</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\camera_thread.hpp">
-      <Filter>源文件\Core</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\detect_thread.hpp">
-      <Filter>源文件\Core</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\Server.hpp">
-      <Filter>源文件\Core</Filter>
+      <Filter>头文件\Core\Utils</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\config.h">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\crop_image.h">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\cuda_utils.h">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\engineTRT.h">
-      <Filter>源文件\Core\detect</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\detect\HalconProcessor.h">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\logging.h">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\detect\HalconProcessor.h">
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\macros.h">
-      <Filter>源文件\Core\detect</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\detect\Slice.h">
-      <Filter>源文件\Core\detect</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\detect\speedSam.h">
-      <Filter>源文件\Core\detect</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\detect\StripeRemoval.h">
-      <Filter>源文件\Core\detect</Filter>
-    </ClInclude>
-    <ClInclude Include="Core\detect\trtyolo_slice.hpp">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
     <ClInclude Include="Core\detect\sam.h">
-      <Filter>源文件\Core\detect</Filter>
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
-    <ClInclude Include="Core\group_manager.hpp">
-      <Filter>源文件\Core</Filter>
+    <ClInclude Include="Core\detect\Slice.h">
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
-    <ClInclude Include="Core\Scheduler.hpp">
-      <Filter>源文件\Core</Filter>
+    <ClInclude Include="Core\detect\speedSam.h">
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
-    <ClInclude Include="Core\sqlite_helper.hpp">
-      <Filter>源文件\Core</Filter>
+    <ClInclude Include="Core\detect\StripeRemoval.h">
+      <Filter>头文件\Core\Detect</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\camera_thread.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\Config.hpp">
+      <Filter>头文件\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\db_utils.hpp">
-      <Filter>源文件\Core</Filter>
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\single_detect_thread.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\detect_thread.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\group_manager.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\image_types.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\queue_manager.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\Scheduler.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\Server.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\sqlite_helper.hpp">
+      <Filter>头文件\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\detect\trtyolo_slice.hpp">
+      <Filter>头文件\Core\Detect</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="File.cu">
-      <Filter>头文件</Filter>
-    </None>
+    <None Include="File.cu" />
   </ItemGroup>
 </Project>

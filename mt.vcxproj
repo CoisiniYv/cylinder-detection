@@ -122,12 +122,14 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;NOMINMAX;ASIO_STANDALONE;
+_WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>..\ThirdParty\Sqlite\inc;..\ThirdParty\concurrentqueue;..\ThirdParty\jsoncpp\include;..\ThirdParty\event\include;..\ThirdParty\MPHdc\inc;..\ThirdParty\curl\include;..\ThirdParty\opencv[cuda118]\include;..\ThirdParty\Halcon\include\halconcpp;..\ThirdParty\trtyolo\include;..\ThirdParty\Halcon\include;D:\Software\cu118\TensorRT\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\ThirdParty\Sqlite\inc;..\ThirdParty\concurrentqueue;..\ThirdParty\jsoncpp\include;..\ThirdParty\event\include;..\ThirdParty\MPHdc\inc;..\ThirdParty\curl\include;..\ThirdParty\opencv[cuda118]\include;..\ThirdParty\Halcon\include\halconcpp;..\ThirdParty\trtyolo\include;..\ThirdParty\Halcon\include;D:\Software\cu118\TensorRT\include;..\ThirdParty\asio-standalone;..\ThirdParty\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <PreprocessToFile>false</PreprocessToFile>
+      <AdditionalOptions>/source-charset:utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -154,6 +156,7 @@
     <ClCompile Include="Core\queue_manager.cpp" />
     <ClCompile Include="Core\Scheduler.cpp" />
     <ClCompile Include="Core\Server.cpp" />
+    <ClCompile Include="Core\single_detect_thread.cpp" />
     <ClCompile Include="Core\sqlite_herpler.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
@@ -179,6 +182,7 @@
     <ClInclude Include="Core\queue_manager.hpp" />
     <ClInclude Include="Core\Scheduler.hpp" />
     <ClInclude Include="Core\Server.hpp" />
+    <ClInclude Include="Core\single_detect_thread.hpp" />
     <ClInclude Include="Core\sqlite_helper.hpp" />
     <ClInclude Include="Core\Utils\Common.hpp" />
     <ClInclude Include="Core\Utils\Log.hpp" />
