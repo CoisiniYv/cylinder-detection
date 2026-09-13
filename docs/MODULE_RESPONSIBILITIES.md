@@ -1,6 +1,6 @@
 # Module Responsibilities and Dependency Boundaries
 
-本文档定义 `cylinder-detection` 的模块职责与依赖边界。目标不是描述“某个文件现在恰好写了什么”，而是约束 **以后什么代码应该放在哪里、什么代码不应该放在哪里**。
+本文档定义 `cylinder-detection` 的模块职责和允许的依赖方向。它不是简单描述“文件里现在写了什么”，而是约束 **以后新增代码应该放在哪里、哪些跨层依赖不允许重新出现**。
 
 ## 1. 总体分层
 
@@ -8,39 +8,41 @@
 main.cpp
   |
   v
-Configuration / Runtime Context
+Configuration / Runtime Control Context
   |
   v
-HTTP Control Plane (Server)
+HTTP Control Plane
+(Server -> http/request_params + detect_request_mapper)
   |
   v
-Application Orchestration (Scheduler)
-  |---------------------------|
-  v                           v
-Hardware Acquisition          Detection Workers
-(Camera / Slide)              (DetectThread / SingleDetectThread)
-  |                           |
-  v                           v
-QueueManager              Algorithm Components
-  |                       (crop/HALCON/slice/YOLO/SAM)
-  |                           |
-  +-------------> GroupManager
-                    |
-                    v
-             InspectionRepository
-                    |
-                    v
-                  SQLite
+Application Orchestration
+(Scheduler)
+  |-------------------------------|
+  v                               v
+Hardware Acquisition              Detection Workers
+(CameraThread / Slide)            (DetectThread / SingleDetectThread)
+  |                               |
+  v                               v
+QueueManager                 DetectionPipeline
+                                  |
+                                  v
+                        preprocess / HALCON / Slice
+                             / YOLO / SAM
+                                  |
+                                  v
+QueueManager -> GroupManager -> InspectionRepository -> SQLite
 ```
 
 核心原则：
 
-1. **HTTP 层不实现算法。**
-2. **Scheduler 不实现数据库表映射，也不实现图像算法。**
-3. **算法模块不读取 HTTP 请求，不管理服务生命周期。**
-4. **硬件传输层不决定业务 GOOD/NG。**
-5. **数据库层不控制相机和线程。**
-6. **共享状态只保存进程级上下文，不作为随手可读写的全局参数仓库。**
+1. **HTTP 层不实现图像算法。**
+2. **Scheduler 不实现 SQL，也不实现检测算法。**
+3. **Worker 只负责线程/队列，不复制检测流水线。**
+4. **DetectionPipeline 不读取 RuntimeState，不认识 HTTP 和数据库。**
+5. **硬件 transport 不决定 GOOD/NG。**
+6. **Repository 不控制相机、线程或队列。**
+7. **共享状态只用于控制面，不能重新演化成 Service Locator。**
+8. **业务含义通过名称和类型表达，不依赖数组位置、magic number 或 buffer 大小猜测。**
 
 ---
 
@@ -48,39 +50,71 @@ QueueManager              Algorithm Components
 
 | 文件 | 单一职责 | 不应承担的职责 |
 | --- | --- | --- |
-| `main.cpp` | CLI、加载配置、初始化数据库、创建 `run_id`、启动 Server | HTTP 路由、算法、相机控制、SQL 表映射 |
-| `Core/Config.hpp/.cpp` | 读取/校验静态进程配置、解析相对路径 | 请求级检测参数、模型推理、数据库业务操作 |
-| `Core/runtime_state.hpp` | 保存进程级运行上下文：Config、当前任务快照、run_id | 算法参数计算、线程实现、持久化逻辑 |
-| `Core/detect_params.hpp` | 定义一次检测任务的纯数据参数 | libevent、WinSock、SQLite、硬件 SDK |
+| `main.cpp` | CLI、配置加载、数据库 bootstrap、创建 `run_id`、启动 Server | HTTP 路由、算法、硬件控制、SQL 表映射 |
+| `Core/Config.hpp/.cpp` | 读取/校验进程配置、解析部署路径 | HTTP 请求参数、模型推理、业务持久化 |
+| `Core/runtime_state.hpp` | 控制面的进程级上下文：Config、当前任务快照、run_id | Worker 输出路径解析、算法执行 |
+| `Core/detect_params.hpp` | 一次检测任务的纯参数 DTO | libevent、WinSock、SQLite、相机 SDK |
+| `Core/detection_context.hpp` | 一次 process run 的输出根目录和 run_id | HTTP、数据库、线程生命周期 |
 
 ### RuntimeState 使用规则
 
-`RuntimeState` 是控制面的共享上下文，不应该成为任意模块的 Service Locator。新增代码优先通过构造函数或函数参数显式传递依赖。
+`RuntimeState` 目前用于 Server 与 Scheduler 的控制面交接。`DetectThread`、`SingleDetectThread` 和 `DetectionPipeline` **不得再直接读取 `g_runtime_state`**。
 
-当前 `DetectThread` / `SingleDetectThread` 仍会读取 `g_runtime_state` 获取输出目录和 `run_id`，这是后续应继续移除的耦合点。
+Worker 所需的输出路径通过 `DetectionContext` 显式注入。新增算法模块也应遵循同样原则。
 
 ---
 
 ## 3. HTTP 控制面
 
-| 文件 | 单一职责 |
-| --- | --- |
-| `Core/Server.hpp` | 对外暴露最小化 Server 生命周期接口 |
-| `Core/Server.cpp` | libevent HTTP 绑定、请求解析、响应序列化、API 路由、应用服务触发 |
+### `Core/Server.hpp/.cpp`
 
-`Server.cpp` 可以知道 `Scheduler`、`SingleDetectThread`、`CameraThread` 的应用接口，但不应该直接实现检测流程本身。
+Server 负责：
 
-后续推荐继续拆分：
+- libevent bind / route registration；
+- API callback；
+- response 输出；
+- 调用 Scheduler、SingleDetectThread、CameraThread 的应用接口；
+- 服务退出时的资源回收。
+
+Server 不负责：
+
+- JSON/query 类型转换细节；
+- HTTP 字段到 `DetectParams` 的逐字段映射；
+- 模型路径规则；
+- 检测算法；
+- SQL。
+
+### `Core/http/request_params.hpp/.cpp`
+
+职责：
 
 ```text
-Server.cpp
-├── HTTP transport / routing
-├── RequestParams parser        -> http_request_params.*
-├── DetectParams mapping        -> detect_request_mapper.*
-└── response serialization      -> api_serialization.*
+HTTP request
+   |
+   +-- JSON body
+   +-- query string
+   |
+   v
+统一 typed read-only parameter view
 ```
 
-当前不强制一次拆完，避免在没有集成测试时造成大面积行为变化。
+这里允许依赖 libevent / jsoncpp，但不允许依赖 Scheduler、Camera、TensorRT 或 SQLite。
+
+### `Core/http/detect_request_mapper.hpp/.cpp`
+
+职责：
+
+```text
+RequestParams + Config
+        |
+        v
+DetectParams
+        |
+        +-- model path resolution
+        +-- request validation
+```
+
+HTTP 字段兼容名、阈值范围、ROI/QW 参数合法性等应集中在 mapper，而不是重新散回 Server。
 
 ---
 
@@ -88,25 +122,47 @@ Server.cpp
 
 | 文件 | 单一职责 |
 | --- | --- |
-| `Core/Scheduler.hpp/.cpp` | 多面检测 pipeline 的生命周期编排和停止顺序 |
-| `Core/queue_manager.hpp/.cpp` | 原始帧和检测结果的线程安全传递、阻塞/唤醒语义 |
-| `Core/group_manager.hpp/.cpp` | 四面结果聚合、超时策略、组完成事件 |
-| `Core/inspection_repository.hpp/.cpp` | 将完成组映射到 SQLite 业务表并事务写入 |
-| `Core/image_types.hpp` | 跨模块传递的图像、元信息和检测结果 DTO |
+| `Core/Scheduler.hpp/.cpp` | 多面任务生命周期、启动/停止顺序、Worker readiness gate |
+| `Core/queue_manager.hpp/.cpp` | 原始帧/检测结果的并发传递与阻塞唤醒 |
+| `Core/group_manager.hpp/.cpp` | 四面结果聚合、timeout、完成事件 |
+| `Core/inspection_repository.hpp/.cpp` | 完成组到 SQLite 业务表的事务映射 |
+| `Core/image_types.hpp` | 跨模块图像和结果 DTO |
 
-### Scheduler 允许做什么
+### Scheduler 当前正确启动顺序
 
-- 创建/持有 CameraThread、DetectThread、GroupManager；
-- 控制启动、停止、join 顺序；
-- 将 GroupManager 完成事件连接到 Repository。
+```text
+QueueManager start
+        |
+        v
+DetectThread x N start
+        |
+        v
+wait all READY / detect startup failure
+        |
+        v
+GroupManager + Repository callback
+        |
+        v
+CameraThread / Slide hardware start
+```
 
-### Scheduler 不允许做什么
+原因：模型/CUDA 初始化失败时，不应先移动滑台或产生无法处理的图像。
+
+### Scheduler 可以做
+
+- 构造 CameraThread、DetectThread、GroupManager；
+- 显式构造 `DetectionContext`；
+- 等待 Worker READY；
+- 管理 stop/join/cleanup 顺序；
+- 将 group-complete event 连接到 Repository。
+
+### Scheduler 不可以做
 
 - 拼 SQL；
-- 创建业务表；
-- 实现 crop / HALCON / YOLO / SAM；
-- 解析 HTTP 参数；
-- 编码滑台协议指令。
+- 实现 crop/HALCON/YOLO/SAM；
+- 解析 HTTP；
+- 操作 TensorRT buffer；
+- 编码串口 transport。
 
 ---
 
@@ -114,121 +170,228 @@ Server.cpp
 
 | 文件 | 单一职责 |
 | --- | --- |
-| `Core/camera_thread.hpp/.cpp` | 相机 SDK 生命周期、采集循环、一次/四面采集时序，并协调滑台动作 |
-| `Core/slide_serial.hpp/.cpp` | 串口句柄、reader thread、按行收发；只负责 transport |
+| `Core/camera_thread.hpp/.cpp` | 相机 SDK 生命周期、单拍/四面采集、当前滑台业务时序 |
+| `Core/slide_serial.hpp/.cpp` | 串口 handle、reader thread、按行收发 transport |
 
-### 边界说明
+`SlideSerialClient` 不解释 GOOD/NG，也不管理 GroupManager。
 
-`SlideSerialClient` 不解释业务流程；LOAD / GOTO_CAM / CAM_NEXT / UNLOAD 的流程编排目前属于 `CameraThread`。
-
-如果滑台协议继续扩大，应新增 `SlideController`：
+当前 LOAD / GOTO_CAM / CAM_NEXT / UNLOAD 状态机仍在 CameraThread。如果协议继续增长，应演进为：
 
 ```text
 CameraThread -> SlideController -> SlideSerialClient
                protocol           transport
 ```
 
-而不是继续把更多协议常量和状态机塞入 `CameraThread`。
+不要继续把复杂协议状态堆到串口类或检测算法中。
 
 ---
 
-## 6. 检测 Worker 层
+## 6. Worker 与 DetectionPipeline
 
-| 文件 | 单一职责 |
-| --- | --- |
-| `Core/detect_thread.hpp/.cpp` | 多面 pipeline 中一个 GPU worker 的线程与模型实例生命周期 |
-| `Core/single_detect_thread.hpp/.cpp` | 单图 API 的串行任务队列、模型缓存与任务完成同步 |
+### `Core/detect_thread.hpp/.cpp`
 
-两个 Worker 当前仍重复实现大量：
+多面 Worker 现在只负责：
+
+- 一个 thread；
+- startup READY/FAILED 信号；
+- 从 Raw Queue 取 `ImageFrame`；
+- 调 `DetectionPipeline::processFrame()`；
+- 向 Result Queue 发布 `SingleImageResult`。
+
+它不再直接持有 HALCON、SliceDetector、SAM，也不拼输出路径。
+
+### `Core/single_detect_thread.hpp/.cpp`
+
+只负责：
+
+- 单图任务队列；
+- submit / wait；
+- stop / join；
+- 调 `DetectionPipeline::configure()` 与 `processFile()`。
+
+它不再维护第二套 preprocess/HALCON/YOLO/SAM 实现。
+
+### `Core/detection_pipeline.hpp/.cpp`
+
+这是当前唯一的检测主链实现：
 
 ```text
-preprocess -> HALCON -> slice -> YOLO -> SAM -> metrics/result
+source image
+    |
+    v
+GPU preprocess
+    |
+    v
+HALCON center extraction
+    |
+    v
+GPU slicing
+    |
+    v
+TensorRT YOLO
+    |
+    v
+SAM segmentation / measurement
+    |
+    v
+SingleImageResult
 ```
 
-长期应抽取无线程语义的 `DetectionPipeline`：
+职责还包括：
 
-```text
-DetectThread ------>
-                    DetectionPipeline::process(input, params, context)
-SingleDetectThread ->
-```
+- CUDA device 选择；
+- detector/SAM model cache；
+- SAM engine -> ONNX fallback；
+- 像素到毫米换算；
+- Detection DTO 填充；
+- 算法失败转换为 `processing_ok=false`。
 
-Worker 只负责线程、排队、取消和错误转换；Pipeline 只负责一次图像处理。
+Pipeline 不应：
 
-在真实数据验证前不建议直接大规模合并，因为当前单图/多图在保存命名和 QW 使用方式上仍有差异。
+- 读 `g_runtime_state`；
+- push/pop QueueManager；
+- 返回 HTTP response；
+- 写 SQLite；
+- 启停相机。
 
 ---
 
-## 7. 算法层 `Core/detect/`
+## 7. 预处理层
+
+### `Core/detect/preprocess_options.hpp`
+
+集中表达 ROI、QW mask、stripe removal、denoise 和保存选项。
+
+新增调用点应使用：
+
+```cpp
+PreprocessOptions options;
+preprocessImage(input, options, stream);
+```
+
+而不是继续扩展 20+ 个位置参数。
+
+### `crop_image.h/.cpp`
+
+`preprocessImage()` 是首选 API。
+
+历史 `cropImage(...)` 长参数函数目前仅作为兼容 wrapper，内部转换为 `PreprocessOptions` 后调用统一实现。后续所有旧调用迁移完成后再删除 wrapper。
+
+---
+
+## 8. 算法层 `Core/detect/`
 
 | 文件 | 职责 |
 | --- | --- |
-| `crop_image.h/.cpp` | GPU 图像预处理入口：ROI、条纹处理、QW mask、可选保存 |
-| `StripeRemoval.h/.cpp` | 频域条纹方向检测、频域抑制和可选 CUDA 去噪 |
-| `HalconProcessor.h/.cpp` | HALCON 中心区域提取 + 异步骨架/overlay 保存 |
-| `Slice.h/.cpp` | 基于中心点生成 CPU/GPU slice |
-| `trtyolo_slice.hpp/.cpp` | slice batch 推理适配、坐标还原、过滤和 NMS |
-| `sam.h/.cpp` | YOLO box -> SAM mask、几何度量、过滤与可视化 |
-| `speedSam.h/.cpp` | SAM encoder/decoder 编排 |
-| `engineTRT.h/.cpp` | TensorRT engine 构建/反序列化、buffer/context/stream 管理 |
-| `config.h` | 历史 SAM 固定模型维度常量 |
-| `logging.h` | TensorRT 示例风格 ILogger 实现 |
+| `preprocess_options.hpp` | 预处理参数模型 |
+| `crop_image.*` | GPU 预处理编排 |
+| `StripeRemoval.*` | 条纹方向分析、频域抑制、可选去噪 |
+| `HalconProcessor.*` | HALCON 候选中心提取和异步 overlay 保存 |
+| `Slice.*` | 根据中心点生成 slice |
+| `trtyolo_slice.*` | slice batch 推理、坐标还原、过滤、NMS |
+| `sam.*` | YOLO box -> mask、过滤、几何度量、可视化 |
+| `speedSam.*` | SAM encoder / decoder 业务编排 |
+| `engineTRT.*` | TensorRT build/load/context/buffer/stream/tensor mapping |
+| `config.h` | 历史 SAM 模型固定维度 |
+| `logging.h` | TensorRT ILogger 实现 |
 | `macros.h` | DLL/TRT 兼容宏 |
-| `cuda_utils.h` | 历史 CUDA 检查宏；应逐步替换为异常/统一错误策略 |
+| `cuda_utils.h` | 历史 CUDA 宏，逐步淘汰 |
 
-### 算法层规则
+### 算法层硬规则
 
-- 不依赖 `Server.hpp`；
-- 不访问 `g_runtime_state`；
-- 不拼接业务数据库路径；
+- 不 include `Server.hpp`；
+- 不访问 RuntimeState；
+- 不访问 Repository/SQLite；
 - 不控制 CameraThread；
-- 参数尽量通过结构体显式传入，而不是继续增加 20+ 个位置参数。
+- CUDA/TensorRT 错误必须显式传播或转换，不依赖 `assert` 作为生产错误处理；
+- 参数优先使用结构体而不是继续增加 positional arguments。
 
 ---
 
-## 8. 数据库层
+## 9. TensorRT 边界
+
+`EngineTRT` 当前负责：
+
+- ONNX build 或 engine deserialize；
+- Runtime / Engine / ExecutionContext 生命周期；
+- host/device buffer；
+- CUDA copy stream；
+- configured tensor name -> engine tensor index 映射。
+
+### 规则
+
+业务代码传入的 tensor name 是契约：
+
+```text
+SAM encoder output: image_embeddings
+SAM decoder input : image_embeddings, point_coords, point_labels,
+                    mask_input, has_mask_input
+SAM decoder output: iou_predictions, low_res_masks
+```
+
+不得重新通过：
+
+- TensorRT 枚举顺序；
+- “第几个 tensor”；
+- output buffer 大小；
+
+去猜业务含义。
+
+当前仍保留 `executeV2` binding-array 路径以避免静态重构改变部署行为。若未来统一 TensorRT 版本，可以单独验证 name/address based enqueue API。
+
+---
+
+## 10. 数据库层
 
 | 文件 | 单一职责 |
 | --- | --- |
-| `Core/sqlite_helper.hpp/.cpp` | SQLite connection/prepared statement 的 RAII 与低层 API |
-| `Core/db_utils.hpp/.cpp` | 数据库 schema 初始化和 run 注册 |
-| `Core/inspection_repository.hpp/.cpp` | inspection 业务实体的读写映射 |
+| `Core/sqlite_helper.hpp/.cpp` | SQLite connection / prepared statement 的 RAII 与低层机制 |
+| `Core/db_utils.hpp/.cpp` | schema bootstrap 和 run 注册 |
+| `Core/inspection_repository.hpp/.cpp` | inspection domain persistence |
 
-三层不能混淆：
+明确分层：
 
 ```text
-SQLiteHelper        = database mechanism
-DB Utils            = schema/bootstrap
-InspectionRepository= domain persistence
+SQLiteHelper         = database mechanism
+DB Utils             = schema/bootstrap
+InspectionRepository = domain persistence
 ```
 
-新增业务 SQL 应优先进入 Repository，而不是 Scheduler/Server。
+新增业务 SQL 进入 Repository，不进入 Scheduler、Server 或 Worker。
+
+下一次 schema 变化前应补正式 migration/version 机制，而不是继续只靠 `CREATE TABLE IF NOT EXISTS`。
 
 ---
 
-## 9. 工具与工程文件
+## 11. 工具和工程文件
 
 | 文件 | 职责 / 约束 |
 | --- | --- |
-| `Core/Utils/Log.hpp` | 项目统一轻量日志宏 |
-| `Core/Utils/Common.hpp` | 无状态、跨模块通用的小工具；禁止堆业务逻辑 |
-| `config.json` | 运行时部署配置示例 |
+| `Core/Utils/Log.hpp` | 项目统一轻量日志 |
+| `Core/Utils/Common.hpp` | 无状态通用函数；禁止业务逻辑堆积 |
+| `config.json` | 可移植运行时配置示例 |
 | `mt.sln` | Visual Studio solution |
-| `mt.vcxproj` | MSBuild 源文件/第三方依赖配置 |
+| `mt.vcxproj` | source + dependency properties |
 | `mt.vcxproj.filters` | Visual Studio 逻辑目录 |
-| `.gitignore` | 构建产物、IDE 文件、输出数据排除 |
-| `.vscode/settings.json` | 编辑器文件关联；不应存机器绝对路径 |
-| `pytesttool/*.py` | HTTP API 手工/冒烟测试工具，不是服务业务实现 |
+| `pytesttool/api_common.py` | API 测试共享 HTTP/config helper |
+| `pytesttool/api_*.py` | 手工/冒烟 API 客户端 |
+
+工程文件中新增模块必须同步登记，避免“Git 仓库里存在、Visual Studio 工程不编译”的隐性错误。
 
 ---
 
-## 10. 建议依赖方向
+## 12. 允许的依赖方向
 
-允许：
+推荐：
 
 ```text
-Server -> Scheduler -> Camera/Workers/GroupManager -> Repository
-Worker -> detect/*
+Server -> http/*
+Server -> Scheduler / SingleDetectThread / CameraThread
+Scheduler -> DetectThread / GroupManager / CameraThread / Repository
+DetectThread -> DetectionPipeline
+SingleDetectThread -> DetectionPipeline
+DetectionPipeline -> detect/*
+GroupManager -> Repository (through completion callback wiring)
 Repository -> SQLiteHelper
 CameraThread -> SlideSerialClient
 ```
@@ -237,11 +400,14 @@ CameraThread -> SlideSerialClient
 
 ```text
 Algorithm -> Server
-Algorithm -> global RuntimeState
+Algorithm -> RuntimeState
+DetectionPipeline -> QueueManager
+DetectionPipeline -> SQLite
 SQLiteHelper -> Scheduler
-SlideSerialClient -> GroupManager
 Repository -> CameraThread
+SlideSerialClient -> GroupManager
 Config -> HTTP request
+Worker -> global output/run state
 ```
 
-如果未来新增模块，优先检查它是否遵循这个单向依赖方向。
+出现新的跨层需求时，优先增加显式接口、context 或 callback，而不是直接 include 更高层文件或新增全局变量。
