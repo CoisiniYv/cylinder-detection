@@ -100,26 +100,32 @@ void DetectThread::markStartupFailed(std::string message) {
 }
 
 void DetectThread::run() {
-    if (!mContext.valid()) {
-        const std::string error = "output context is invalid";
-        LOGE("DetectThread[%d] %s", mIndex, error.c_str());
-        markStartupFailed(error);
+    try {
+        if (!mContext.valid()) {
+            throw std::runtime_error("output context is invalid");
+        }
+
+        std::string configure_error;
+        if (!mPipeline || !mPipeline->configure(mParams, configure_error)) {
+            if (configure_error.empty()) configure_error = "pipeline initialization failed";
+            throw std::runtime_error(configure_error);
+        }
+
+        markStartupReady();
+        LOGI("DetectThread[%d] ready on GPU %d", mIndex, mPipeline->gpuDevice());
+    }
+    catch (const std::exception& e) {
+        LOGE("DetectThread[%d] startup failed: %s", mIndex, e.what());
+        markStartupFailed(e.what());
         mRunning.store(false, std::memory_order_relaxed);
         return;
     }
-
-    std::string configure_error;
-    if (!mPipeline || !mPipeline->configure(mParams, configure_error)) {
-        if (configure_error.empty()) configure_error = "pipeline initialization failed";
-        LOGE("DetectThread[%d] pipeline initialization failed: %s",
-             mIndex, configure_error.c_str());
-        markStartupFailed(configure_error);
+    catch (...) {
+        LOGE("DetectThread[%d] startup failed with unknown exception", mIndex);
+        markStartupFailed("unknown startup exception");
         mRunning.store(false, std::memory_order_relaxed);
         return;
     }
-
-    markStartupReady();
-    LOGI("DetectThread[%d] ready on GPU %d", mIndex, mPipeline->gpuDevice());
 
     while (mRunning.load(std::memory_order_relaxed)) {
         ImageFrame frame;
@@ -128,7 +134,21 @@ void DetectThread::run() {
             continue;
         }
 
-        SingleImageResult result = mPipeline->processFrame(frame, mContext);
+        SingleImageResult result;
+        try {
+            result = mPipeline->processFrame(frame, mContext);
+        }
+        catch (const std::exception& e) {
+            result.meta = frame.meta;
+            result.processing_ok = false;
+            result.error_message = e.what();
+        }
+        catch (...) {
+            result.meta = frame.meta;
+            result.processing_ok = false;
+            result.error_message = "unknown pipeline exception";
+        }
+
         if (!result.processing_ok) {
             LOGE("DetectThread[%d] frame processing failed: group=%llu face=%d error=%s",
                  mIndex,
