@@ -1,21 +1,11 @@
 #pragma once
 
-#include <string>
-#include <vector>
+#include <atomic>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
-#include <atomic>
-
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
+#include <vector>
 
 namespace XL {
 
@@ -25,22 +15,23 @@ struct SerialConfig {
     int timeout_ms = 100;
 };
 
+// Line-oriented serial transport for the slide controller.
+// Protocol commands remain in CameraThread; this class only owns the serial
+// handle, reader thread and received-line buffering.
 class SlideSerialClient {
 public:
-    SlideSerialClient();
+    SlideSerialClient() = default;
     ~SlideSerialClient();
 
-    bool Open(const SerialConfig& cfg);
+    SlideSerialClient(const SlideSerialClient&) = delete;
+    SlideSerialClient& operator=(const SlideSerialClient&) = delete;
+
+    bool Open(const SerialConfig& config);
     void Close();
     bool IsOpen() const noexcept;
-
-    // send a line, auto appends '\n'
     bool WriteLine(const std::string& line);
-
-    // non-blocking drain of received lines
     std::vector<std::string> DrainLines();
 
-    // enumerate ports (best-effort)
     static std::vector<std::string> ListPorts();
 
 private:
@@ -48,18 +39,14 @@ private:
     static std::string normalizePortName(const std::string& port);
 
 private:
-#ifdef _WIN32
-    HANDLE mHandle = (HANDLE)(uintptr_t)-1;
-#else
-    void* mHandle = nullptr;
-#endif
-    std::atomic<bool> mRunning{ false };
+    void* mHandle = nullptr; // HANDLE on Windows; intentionally opaque in public header
+    std::atomic<bool> mRunning{false};
     std::thread mThread;
-    SerialConfig mCfg{};
+    SerialConfig mConfig{};
 
-    std::mutex mMtx;
+    std::mutex mMutex;
     std::deque<std::string> mLines;
-    std::string mBuf;
+    std::string mBuffer;
 };
 
 } // namespace XL
