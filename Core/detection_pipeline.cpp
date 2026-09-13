@@ -4,6 +4,7 @@
 #include "detect/HalconProcessor.h"
 #include "detect/Slice.h"
 #include "detect/crop_image.h"
+#include "detect/preprocess_options.hpp"
 #include "detect/sam.h"
 #include "detect/trtyolo_slice.hpp"
 
@@ -39,6 +40,43 @@ std::pair<std::string, std::string> selectSamModels(const DetectParams& params) 
         decoder = params.sam_decoder_onnx_file;
     }
     return {std::move(encoder), std::move(decoder)};
+}
+
+PreprocessOptions makePreprocessOptions(
+    const DetectParams& params,
+    bool apply_qw_mask,
+    bool apply_stripe_removal,
+    std::string file_name = "cropped_image",
+    std::string output_dir = {}) {
+    PreprocessOptions options;
+
+    options.crop.enabled = params.enable_four_side_crop;
+    options.crop.x = params.crop_x;
+    options.crop.y = params.crop_y;
+    options.crop.width = params.crop_width;
+    options.crop.height = params.crop_height;
+
+    options.qw_mask.enabled = apply_qw_mask;
+    options.qw_mask.x1 = params.circle_x1;
+    options.qw_mask.y1 = params.circle_y1;
+    options.qw_mask.x2 = params.circle_x2;
+    options.qw_mask.y2 = params.circle_y2;
+    options.qw_mask.radius = params.radius;
+
+    options.stripe.enabled = apply_stripe_removal && params.enable_fourier_transform;
+    options.stripe.filter_width = params.filter_width;
+    options.stripe.attenuation_factor = params.attenuation_factor;
+    options.stripe.target_angle = params.target_angle;
+    options.stripe.angle_tolerance = params.angle_tolerance;
+    options.stripe.denoise = apply_stripe_removal && params.enable_denoising;
+    options.stripe.denoise_h = params.denoise_h;
+    options.stripe.denoise_h_color = params.denoise_hColor;
+    options.stripe.denoise_search_window = params.denoise_search_window;
+    options.stripe.denoise_template_window = params.denoise_template_window;
+
+    options.save.file_name = std::move(file_name);
+    options.save.output_dir = std::move(output_dir);
+    return options;
 }
 
 SingleImageResult failedResult(
@@ -199,58 +237,26 @@ struct DetectionPipeline::Impl {
             cv::cuda::GpuMat input_gpu;
             input_gpu.upload(source, stream);
 
-            cv::cuda::GpuMat processed_gpu = cropImage(
-                input_gpu,
-                params.enable_four_side_crop,
-                params.crop_x,
-                params.crop_y,
-                params.crop_width,
-                params.crop_height,
+            const PreprocessOptions analysis_options = makePreprocessOptions(
+                params,
                 apply_qw_mask,
-                params.circle_x1,
-                params.circle_y1,
-                params.circle_x2,
-                params.circle_y2,
-                params.radius,
+                true,
                 "fft_image",
-                "",
-                params.enable_fourier_transform,
-                params.filter_width,
-                params.attenuation_factor,
-                params.target_angle,
-                params.angle_tolerance,
-                params.enable_denoising,
-                params.denoise_h,
-                params.denoise_hColor,
-                params.denoise_search_window,
-                params.denoise_template_window,
+                {});
+            cv::cuda::GpuMat processed_gpu = preprocessImage(
+                input_gpu,
+                analysis_options,
                 stream);
 
-            cv::cuda::GpuMat visualization_source_gpu = cropImage(
-                input_gpu,
-                params.enable_four_side_crop,
-                params.crop_x,
-                params.crop_y,
-                params.crop_width,
-                params.crop_height,
+            const PreprocessOptions visualization_options = makePreprocessOptions(
+                params,
                 apply_qw_mask,
-                params.circle_x1,
-                params.circle_y1,
-                params.circle_x2,
-                params.circle_y2,
-                params.radius,
+                false,
                 original_name,
-                save_original_image ? output_dir.string() : std::string(),
-                false,
-                params.filter_width,
-                params.attenuation_factor,
-                params.target_angle,
-                params.angle_tolerance,
-                false,
-                params.denoise_h,
-                params.denoise_hColor,
-                params.denoise_search_window,
-                params.denoise_template_window,
+                save_original_image ? output_dir.string() : std::string());
+            cv::cuda::GpuMat visualization_source_gpu = preprocessImage(
+                input_gpu,
+                visualization_options,
                 stream);
 
             // HALCON crosses from OpenCV's explicit CUDA stream to its own
