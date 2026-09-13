@@ -4,6 +4,7 @@
 #include "camera_thread.hpp"
 #include "queue_manager.hpp"
 
+#include <exception>
 #include <vector>
 
 namespace XL {
@@ -105,7 +106,20 @@ bool GroupManager::finalizeGroup(std::uint64_t group_id, bool timed_out) {
          group_ng ? "NG" : "GOOD",
          timed_out ? " timeout" : "");
 
-    if (mOnComplete) mOnComplete(result);
+    // Persistence/reporting is an extension point. A downstream exception must
+    // not terminate the aggregation thread or permanently stall camera flow.
+    if (mOnComplete) {
+        try {
+            mOnComplete(result);
+        }
+        catch (const std::exception& e) {
+            LOGE("group completion callback failed: %s", e.what());
+        }
+        catch (...) {
+            LOGE("group completion callback failed with unknown exception");
+        }
+    }
+
     if (mCamera) mCamera->allow_next_group();
     return true;
 }
