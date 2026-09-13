@@ -117,8 +117,9 @@ void SingleDetectThread::worker() {
             task->params.input_image_path,
             mContext);
         if (!result.processing_ok) {
-            LOGE("single-image task failed: %s", result.error_message.c_str());
-            completeTask(task, false, std::move(result), result.error_message);
+            const std::string processing_error = result.error_message;
+            LOGE("single-image task failed: %s", processing_error.c_str());
+            completeTask(task, false, std::move(result), processing_error);
             continue;
         }
 
