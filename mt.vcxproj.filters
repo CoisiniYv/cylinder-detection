@@ -8,6 +8,8 @@
     <Filter Include="头文件\Core\Utils"><UniqueIdentifier>{27405e76-4ab6-43a5-acf7-96c4e30d1a0d}</UniqueIdentifier></Filter>
     <Filter Include="源文件\Core\detect"><UniqueIdentifier>{f2e6c384-03d7-4f9d-9dd3-6a3b063b4585}</UniqueIdentifier></Filter>
     <Filter Include="头文件\Core\detect"><UniqueIdentifier>{e42e168b-f0e7-485f-a5be-fb4d6c82419a}</UniqueIdentifier></Filter>
+    <Filter Include="源文件\Core\http"><UniqueIdentifier>{a3374f9a-4797-49df-af24-74d2747ae12c}</UniqueIdentifier></Filter>
+    <Filter Include="头文件\Core\http"><UniqueIdentifier>{28f92070-33a0-4470-a799-8748dfceee03}</UniqueIdentifier></Filter>
   </ItemGroup>
 
   <ItemGroup>
@@ -25,6 +27,9 @@
     <ClCompile Include="Core\slide_serial.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\sqlite_helper.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\db_utils.cpp"><Filter>源文件\Core</Filter></ClCompile>
+
+    <ClCompile Include="Core\http\detect_request_mapper.cpp"><Filter>源文件\Core\http</Filter></ClCompile>
+    <ClCompile Include="Core\http\request_params.cpp"><Filter>源文件\Core\http</Filter></ClCompile>
 
     <ClCompile Include="Core\detect\crop_image.cpp"><Filter>源文件\Core\detect</Filter></ClCompile>
     <ClCompile Include="Core\detect\engineTRT.cpp"><Filter>源文件\Core\detect</Filter></ClCompile>
@@ -58,6 +63,9 @@
     <ClInclude Include="Core\sqlite_helper.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\slide_serial.hpp"><Filter>头文件\Core</Filter></ClInclude>
 
+    <ClInclude Include="Core\http\detect_request_mapper.hpp"><Filter>头文件\Core\http</Filter></ClInclude>
+    <ClInclude Include="Core\http\request_params.hpp"><Filter>头文件\Core\http</Filter></ClInclude>
+
     <ClInclude Include="Core\detect\config.h"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\crop_image.h"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\cuda_utils.h"><Filter>头文件\Core\detect</Filter></ClInclude>
@@ -65,6 +73,7 @@
     <ClInclude Include="Core\detect\logging.h"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\HalconProcessor.h"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\macros.h"><Filter>头文件\Core\detect</Filter></ClInclude>
+    <ClInclude Include="Core\detect\preprocess_options.hpp"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\sam.h"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\Slice.h"><Filter>头文件\Core\detect</Filter></ClInclude>
     <ClInclude Include="Core\detect\speedSam.h"><Filter>头文件\Core\detect</Filter></ClInclude>
