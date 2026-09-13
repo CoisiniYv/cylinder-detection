@@ -47,7 +47,7 @@ cv::Mat SpeedSam::predict(
     mMaskDecoder->setInput(
         mFeatures.data(),
         point_data.data(),
-        const_cast<float*>(labels.data()),
+        labels.data(),
         mMaskInput.data(),
         &mHasMaskInput,
         static_cast<int>(points.size()));
