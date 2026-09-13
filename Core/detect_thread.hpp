@@ -1,11 +1,7 @@
 #pragma once
 
-#include "detect/HalconProcessor.h"
-#include "detect/Slice.h"
-#include "detect/crop_image.h"
-#include "detect/sam.h"
-#include "detect/trtyolo_slice.hpp"
 #include "detect_params.hpp"
+#include "detection_context.hpp"
 
 #include <atomic>
 #include <memory>
@@ -13,13 +9,19 @@
 
 namespace XL {
 
-// One GPU worker in the multi-face pipeline.
+class DetectionPipeline;
+
+// One worker in the multi-face pipeline.
 //
-// Responsibilities: own thread-local model instances, consume ImageFrame from
-// QueueManager, execute the detection pipeline and publish SingleImageResult.
+// Responsibilities are intentionally narrow: own one worker thread, consume
+// ImageFrame objects from QueueManager, delegate image processing to
+// DetectionPipeline, and publish SingleImageResult objects.
 class DetectThread {
 public:
-    DetectThread(int thread_index, const DetectParams& params);
+    DetectThread(
+        int thread_index,
+        const DetectParams& params,
+        DetectionContext context);
     ~DetectThread();
 
     DetectThread(const DetectThread&) = delete;
@@ -39,14 +41,8 @@ private:
     std::thread mThread;
     std::atomic<bool> mRunning{false};
     DetectParams mParams;
-
-    std::unique_ptr<trtyolo::SliceDetector> mSliceDetector;
-    HalconProcessor mHalcon;
-    bool mModelReady = false;
-
-    std::unique_ptr<SamSegmenter> mSam;
-    bool mSamReady = false;
-    bool mPreferPsImage = true;
+    DetectionContext mContext;
+    std::unique_ptr<DetectionPipeline> mPipeline;
 };
 
 } // namespace XL
