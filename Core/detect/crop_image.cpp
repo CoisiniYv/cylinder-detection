@@ -11,6 +11,129 @@
 #include <stdexcept>
 #include <vector>
 
+cv::cuda::GpuMat preprocessImage(
+    const cv::cuda::GpuMat& image_input,
+    const PreprocessOptions& options,
+    cv::cuda::Stream& stream) {
+    if (image_input.empty()) throw std::invalid_argument("preprocess input image is empty");
+
+    cv::cuda::GpuMat processed;
+    if (options.crop.enabled) {
+        const auto& crop = options.crop;
+        if (crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0 ||
+            crop.x + crop.width > image_input.cols ||
+            crop.y + crop.height > image_input.rows) {
+            throw std::out_of_range("ROI crop is outside the input image");
+        }
+        cv::cuda::GpuMat roi(
+            image_input,
+            cv::Rect(crop.x, crop.y, crop.width, crop.height));
+        roi.copyTo(processed, stream);
+    }
+    else {
+        image_input.copyTo(processed, stream);
+    }
+
+    if (options.stripe.enabled) {
+        const auto& stripe = options.stripe;
+        StripeRemoval stripe_removal;
+        processed = stripe_removal.remove_image_stripes(
+            processed,
+            {},
+            stripe.filter_width,
+            stripe.attenuation_factor,
+            stripe.target_angle,
+            stripe.angle_tolerance,
+            stripe.denoise,
+            stripe.denoise_h,
+            stripe.denoise_h_color,
+            stripe.denoise_search_window,
+            stripe.denoise_template_window,
+            stream);
+    }
+
+    if (options.qw_mask.enabled) {
+        const auto& mask_options = options.qw_mask;
+        if (mask_options.x1 < 0 || mask_options.y1 < 0 ||
+            mask_options.x2 < 0 || mask_options.y2 < 0 ||
+            mask_options.radius <= 0) {
+            throw std::invalid_argument("QW mask requires valid circle centers and radius");
+        }
+
+        const int crop_x = options.crop.enabled ? options.crop.x : 0;
+        const int crop_y = options.crop.enabled ? options.crop.y : 0;
+        const int left_center_x = mask_options.x1 - crop_x;
+        const int left_center_y = mask_options.y1 - crop_y;
+        const int right_center_x = mask_options.x2 - crop_x;
+        const int right_center_y = mask_options.y2 - crop_y;
+
+        cv::Mat mask(processed.size(), CV_8UC1, cv::Scalar(255));
+        cv::circle(
+            mask,
+            cv::Point(left_center_x, left_center_y),
+            mask_options.radius,
+            cv::Scalar(0),
+            -1);
+        cv::circle(
+            mask,
+            cv::Point(right_center_x, right_center_y),
+            mask_options.radius,
+            cv::Scalar(0),
+            -1);
+
+        cv::cuda::GpuMat mask_gpu;
+        mask_gpu.upload(mask, stream);
+        cv::cuda::GpuMat mask_float;
+        mask_gpu.convertTo(mask_float, CV_32F, 1.0 / 255.0, 0.0, stream);
+
+        const int channels = processed.channels();
+        cv::cuda::GpuMat processed_float;
+        processed.convertTo(
+            processed_float,
+            CV_MAKETYPE(CV_32F, channels),
+            1.0,
+            0.0,
+            stream);
+
+        if (channels == 1) {
+            cv::cuda::multiply(processed_float, mask_float, processed_float, 1.0, -1, stream);
+        }
+        else {
+            std::vector<cv::cuda::GpuMat> mask_channels(
+                static_cast<std::size_t>(channels),
+                mask_float);
+            cv::cuda::GpuMat expanded_mask;
+            cv::cuda::merge(mask_channels, expanded_mask, stream);
+            cv::cuda::multiply(
+                processed_float,
+                expanded_mask,
+                processed_float,
+                1.0,
+                -1,
+                stream);
+        }
+
+        processed_float.convertTo(processed, processed.type(), 1.0, 0.0, stream);
+    }
+
+    if (!options.save.output_dir.empty()) {
+        const std::filesystem::path directory(options.save.output_dir);
+        std::filesystem::create_directories(directory);
+        const std::filesystem::path output_file =
+            directory / (options.save.file_name + ".png");
+
+        cv::Mat output_cpu;
+        processed.download(output_cpu, stream);
+        stream.waitForCompletion();
+        if (!cv::imwrite(output_file.string(), output_cpu)) {
+            throw std::runtime_error(
+                "failed to save preprocessed image: " + output_file.string());
+        }
+    }
+
+    return processed;
+}
+
 cv::cuda::GpuMat cropImage(
     const cv::cuda::GpuMat& image_input,
     bool enable_four_side_crop,
@@ -37,87 +160,33 @@ cv::cuda::GpuMat cropImage(
     int denoise_search_window_size,
     int denoise_template_window_size,
     cv::cuda::Stream& stream) {
-    if (image_input.empty()) throw std::invalid_argument("preprocess input image is empty");
+    PreprocessOptions options;
+    options.crop.enabled = enable_four_side_crop;
+    options.crop.x = x;
+    options.crop.y = y;
+    options.crop.width = width;
+    options.crop.height = height;
 
-    cv::cuda::GpuMat processed;
-    if (enable_four_side_crop) {
-        if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
-            x + width > image_input.cols || y + height > image_input.rows) {
-            throw std::out_of_range("ROI crop is outside the input image");
-        }
-        cv::cuda::GpuMat roi(image_input, cv::Rect(x, y, width, height));
-        roi.copyTo(processed, stream);
-    }
-    else {
-        image_input.copyTo(processed, stream);
-    }
+    options.qw_mask.enabled = is_qw;
+    options.qw_mask.x1 = x1_circle;
+    options.qw_mask.y1 = y1_circle;
+    options.qw_mask.x2 = x2_circle;
+    options.qw_mask.y2 = y2_circle;
+    options.qw_mask.radius = radius;
 
-    if (enable_fourier_transform) {
-        StripeRemoval stripe_removal;
-        processed = stripe_removal.remove_image_stripes(
-            processed,
-            {},
-            filter_width,
-            attenuation_factor,
-            target_angle,
-            angle_tolerance,
-            enable_denoising,
-            denoise_h,
-            denoise_h_color,
-            denoise_search_window_size,
-            denoise_template_window_size,
-            stream);
-    }
+    options.save.file_name = file_name;
+    options.save.output_dir = output_dir;
 
-    if (is_qw) {
-        if (x1_circle < 0 || y1_circle < 0 || x2_circle < 0 || y2_circle < 0 || radius <= 0) {
-            throw std::invalid_argument("QW mask requires valid circle centers and radius");
-        }
+    options.stripe.enabled = enable_fourier_transform;
+    options.stripe.filter_width = filter_width;
+    options.stripe.attenuation_factor = attenuation_factor;
+    options.stripe.target_angle = target_angle;
+    options.stripe.angle_tolerance = angle_tolerance;
+    options.stripe.denoise = enable_denoising;
+    options.stripe.denoise_h = denoise_h;
+    options.stripe.denoise_h_color = denoise_h_color;
+    options.stripe.denoise_search_window = denoise_search_window_size;
+    options.stripe.denoise_template_window = denoise_template_window_size;
 
-        const int left_center_x = enable_four_side_crop ? x1_circle - x : x1_circle;
-        const int left_center_y = enable_four_side_crop ? y1_circle - y : y1_circle;
-        const int right_center_x = enable_four_side_crop ? x2_circle - x : x2_circle;
-        const int right_center_y = enable_four_side_crop ? y2_circle - y : y2_circle;
-
-        cv::Mat mask(processed.size(), CV_8UC1, cv::Scalar(255));
-        cv::circle(mask, cv::Point(left_center_x, left_center_y), radius, cv::Scalar(0), -1);
-        cv::circle(mask, cv::Point(right_center_x, right_center_y), radius, cv::Scalar(0), -1);
-
-        cv::cuda::GpuMat mask_gpu;
-        mask_gpu.upload(mask, stream);
-        cv::cuda::GpuMat mask_float;
-        mask_gpu.convertTo(mask_float, CV_32F, 1.0 / 255.0, 0.0, stream);
-
-        const int channels = processed.channels();
-        cv::cuda::GpuMat processed_float;
-        processed.convertTo(processed_float, CV_MAKETYPE(CV_32F, channels), 1.0, 0.0, stream);
-
-        if (channels == 1) {
-            cv::cuda::multiply(processed_float, mask_float, processed_float, 1.0, -1, stream);
-        }
-        else {
-            std::vector<cv::cuda::GpuMat> mask_channels(
-                static_cast<std::size_t>(channels), mask_float);
-            cv::cuda::GpuMat expanded_mask;
-            cv::cuda::merge(mask_channels, expanded_mask, stream);
-            cv::cuda::multiply(processed_float, expanded_mask, processed_float, 1.0, -1, stream);
-        }
-
-        processed_float.convertTo(processed, processed.type(), 1.0, 0.0, stream);
-    }
-
-    if (!output_dir.empty()) {
-        const std::filesystem::path directory(output_dir);
-        std::filesystem::create_directories(directory);
-        const std::filesystem::path output_file = directory / (file_name + ".png");
-
-        cv::Mat output_cpu;
-        processed.download(output_cpu, stream);
-        stream.waitForCompletion();
-        if (!cv::imwrite(output_file.string(), output_cpu)) {
-            throw std::runtime_error("failed to save preprocessed image: " + output_file.string());
-        }
-    }
-
-    return processed;
+    return preprocessImage(image_input, options, stream);
 }
