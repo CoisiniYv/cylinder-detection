@@ -5,6 +5,7 @@
 #include "queue_manager.hpp"
 
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
