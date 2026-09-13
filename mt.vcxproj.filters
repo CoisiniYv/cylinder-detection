@@ -15,6 +15,7 @@
     <ClCompile Include="Core\Config.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\queue_manager.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\camera_thread.cpp"><Filter>源文件\Core</Filter></ClCompile>
+    <ClCompile Include="Core\detection_pipeline.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\single_detect_thread.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\detect_thread.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\Server.cpp"><Filter>源文件\Core</Filter></ClCompile>
@@ -43,6 +44,8 @@
     <ClInclude Include="Core\Config.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\db_utils.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\detect_params.hpp"><Filter>头文件\Core</Filter></ClInclude>
+    <ClInclude Include="Core\detection_context.hpp"><Filter>头文件\Core</Filter></ClInclude>
+    <ClInclude Include="Core\detection_pipeline.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\single_detect_thread.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\detect_thread.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\group_manager.hpp"><Filter>头文件\Core</Filter></ClInclude>
