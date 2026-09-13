@@ -1,9 +1,7 @@
 #pragma once
 
-#include "detect/HalconProcessor.h"
-#include "detect/sam.h"
-#include "detect/trtyolo_slice.hpp"
 #include "detect_params.hpp"
+#include "detection_context.hpp"
 #include "image_types.hpp"
 
 #include <atomic>
@@ -16,12 +14,15 @@
 
 namespace XL {
 
-// Dedicated serialized worker for the single-image HTTP API.
-// Model instances are cached between requests and recreated only when their
-// model path or CUDA device changes.
+class DetectionPipeline;
+
+// Serialized worker for the single-image HTTP API.
+//
+// This class owns task queuing and synchronization only. Model caching, CUDA
+// placement and image-processing steps belong to DetectionPipeline.
 class SingleDetectThread {
 public:
-    SingleDetectThread();
+    explicit SingleDetectThread(DetectionContext context);
     ~SingleDetectThread();
 
     SingleDetectThread(const SingleDetectThread&) = delete;
@@ -57,22 +58,14 @@ private:
         std::string error);
 
 private:
+    DetectionContext mContext;
+    std::unique_ptr<DetectionPipeline> mPipeline;
+
     std::thread mThread;
     std::atomic<bool> mRunning{false};
     std::mutex mQueueMutex;
     std::condition_variable mQueueCondition;
     std::deque<std::shared_ptr<Task>> mTasks;
-
-    std::unique_ptr<trtyolo::SliceDetector> mSliceDetector;
-    std::string mLastTrtEngineFile;
-
-    std::unique_ptr<SamSegmenter> mSam;
-    bool mSamReady = false;
-    std::string mLastEncoderPath;
-    std::string mLastDecoderPath;
-
-    int mCurrentGpuDevice = -1;
-    HalconProcessor mHalcon;
 };
 
 } // namespace XL
