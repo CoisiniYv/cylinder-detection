@@ -1,12 +1,22 @@
 #pragma once
 
+#include "preprocess_options.hpp"
+
 #include <opencv2/core/cuda.hpp>
 
 #include <string>
 
-// GPU preprocessing entry point used by both detection pipelines.
-// It performs, in order: optional ROI crop -> optional stripe removal/denoise
-// -> optional QW circular masking -> optional PNG save.
+// Preferred preprocessing entry point used by detection pipelines.
+// Processing order: optional ROI crop -> optional stripe removal/denoise ->
+// optional QW circular masking -> optional PNG save.
+cv::cuda::GpuMat preprocessImage(
+    const cv::cuda::GpuMat& image_input,
+    const PreprocessOptions& options,
+    cv::cuda::Stream& stream = cv::cuda::Stream::Null());
+
+// Compatibility wrapper for older call sites. New code should construct a
+// PreprocessOptions object and call preprocessImage() instead of relying on this
+// long positional parameter list.
 cv::cuda::GpuMat cropImage(
     const cv::cuda::GpuMat& image_input,
     bool enable_four_side_crop = false,
