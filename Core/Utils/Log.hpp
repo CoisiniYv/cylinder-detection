@@ -1,21 +1,35 @@
-﻿#pragma once
+#pragma once
 
-#include <time.h>
+#include <cstdio>
+#include <ctime>
 #include <string>
 
 namespace XL {
-#pragma warning( disable : 4996 )
 
-	static std::string XLlogTime() {
-		const char* time_fmt = "%Y-%m-%d %H:%M:%S";
-		time_t t = time(nullptr);
-		char time_str[64];
-		strftime(time_str, sizeof(time_str), time_fmt, localtime(&t));
+inline std::string logTime() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local_time{};
+#if defined(_WIN32)
+    localtime_s(&local_time, &now);
+#else
+    localtime_r(&now, &local_time);
+#endif
 
-		return time_str;
-	}
-
-#define LOGI(format, ...)  fprintf(stderr,"[INFO]%s [%s:%d] " format "\n", XL::XLlogTime().data(),__func__,__LINE__,##__VA_ARGS__)
-#define LOGE(format, ...)  fprintf(stderr,"[ERROR]%s [%s:%d] " format "\n",XL::XLlogTime().data(),__func__,__LINE__,##__VA_ARGS__)
-#define LOGC(format, ...)  fprintf(stderr,"[CONFIG]%s " format "\n", XL::XLlogTime().data(),##__VA_ARGS__)
+    char buffer[64]{};
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local_time);
+    return buffer;
 }
+
+} // namespace XL
+
+#define LOGI(format, ...) \
+    std::fprintf(stderr, "[INFO] %s [%s:%d] " format "\n", \
+                 XL::logTime().c_str(), __func__, __LINE__ __VA_OPT__(,) __VA_ARGS__)
+
+#define LOGE(format, ...) \
+    std::fprintf(stderr, "[ERROR] %s [%s:%d] " format "\n", \
+                 XL::logTime().c_str(), __func__, __LINE__ __VA_OPT__(,) __VA_ARGS__)
+
+#define LOGC(format, ...) \
+    std::fprintf(stderr, "[CONFIG] %s " format "\n", \
+                 XL::logTime().c_str() __VA_OPT__(,) __VA_ARGS__)
