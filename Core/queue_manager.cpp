@@ -1,132 +1,155 @@
-﻿#include "queue_manager.hpp"
+#include "queue_manager.hpp"
+
+#include <utility>
 
 namespace XL {
 
-	QueueManager g_queue_manager; // 全局实例定义
+QueueManager g_queue_manager;
 
-	QueueManager::QueueManager() {}
-	QueueManager::~QueueManager() { stop(); }
+QueueManager::~QueueManager() {
+    stop();
+}
 
-	void QueueManager::start() {
-		mStopped.store(false, std::memory_order_relaxed);
-	}
+void QueueManager::start() {
+    mStopped.store(false, std::memory_order_release);
+}
 
-	void QueueManager::stop() {
-		mStopped.store(true, std::memory_order_relaxed);
-		// 唤醒所有阻塞等待者
-		mRawCv.notify_all();
-		mResultCv.notify_all();
-	}
+void QueueManager::stop() {
+    mStopped.store(true, std::memory_order_release);
+    mRawCv.notify_all();
+    mResultCv.notify_all();
+}
 
-	void QueueManager::clearRaw() {
-		RawType tmp;
-		while (mRawQueue.try_dequeue(tmp)) {
-			// 释放资源（cv::Mat 内部引用计数自动处理）
-			tmp.clear();
-		}
-	}
+void QueueManager::clearRaw() {
+    RawType item;
+    while (mRawQueue.try_dequeue(item)) {
+        item.clear();
+    }
+    mRawCount.store(0, std::memory_order_release);
+}
 
-	void QueueManager::clearResult() {
-		ResultType tmp;
-		while (mResultQueue.try_dequeue(tmp)) {
-			// 结果中包含的 Mat 也会自动释放
-		}
-	}
+void QueueManager::clearResult() {
+    ResultType item;
+    while (mResultQueue.try_dequeue(item)) {
+    }
+    mResultCount.store(0, std::memory_order_release);
+}
 
-	bool QueueManager::pushRaw(const RawType& item) {
-		if (mStopped.load(std::memory_order_relaxed)) return false;
-		mRawQueue.enqueue(item);
-		mRawCv.notify_one();
-		return true;
-	}
+template <typename Item, typename Queue>
+bool QueueManager::tryPop(Queue& queue, std::atomic<std::size_t>& count, Item& out) {
+    if (!queue.try_dequeue(out)) return false;
 
-	bool QueueManager::pushRaw(RawType&& item) {
-		if (mStopped.load(std::memory_order_relaxed)) return false;
-		mRawQueue.enqueue(std::move(item));
-		mRawCv.notify_one();
-		return true;
-	}
+    // All queue mutations go through QueueManager. The guard avoids wrapping
+    // an unsigned counter if clear*() races a final consumer during teardown.
+    std::size_t current = count.load(std::memory_order_relaxed);
+    while (current > 0 &&
+           !count.compare_exchange_weak(
+               current,
+               current - 1,
+               std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
+    return true;
+}
 
-	bool QueueManager::tryPopRaw(RawType& out) {
-		if (mRawQueue.try_dequeue(out)) {
-			return true;
-		}
-		return false;
-	}
+bool QueueManager::pushRaw(const RawType& item) {
+    if (stopped()) return false;
+    mRawQueue.enqueue(item);
+    mRawCount.fetch_add(1, std::memory_order_release);
+    mRawCv.notify_one();
+    return true;
+}
 
-	bool QueueManager::popRawBlocking(RawType& out, int timeout_ms) {
-		if (tryPopRaw(out)) return true;
-		std::unique_lock<std::mutex> lock(mRawMtx);
-		if (timeout_ms < 0) {
-			// 无限等待，直到有数据或停止
-			while (!mStopped.load(std::memory_order_relaxed)) {
-				mRawCv.wait(lock);
-				if (tryPopRaw(out)) return true;
-			}
-			return false;
-		}
-		else {
-			auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-			while (!mStopped.load(std::memory_order_relaxed)) {
-				if (mRawCv.wait_until(lock, deadline) == std::cv_status::timeout) {
-					return tryPopRaw(out); // 最后再尝试一次
-				}
-				if (tryPopRaw(out)) return true;
-			}
-			return false;
-		}
-	}
+bool QueueManager::pushRaw(RawType&& item) {
+    if (stopped()) return false;
+    mRawQueue.enqueue(std::move(item));
+    mRawCount.fetch_add(1, std::memory_order_release);
+    mRawCv.notify_one();
+    return true;
+}
 
-	bool QueueManager::pushResult(const ResultType& item) {
-		if (mStopped.load(std::memory_order_relaxed)) return false;
-		mResultQueue.enqueue(item);
-		mResultCv.notify_one();
-		return true;
-	}
+bool QueueManager::tryPopRaw(RawType& out) {
+    return tryPop(mRawQueue, mRawCount, out);
+}
 
-	bool QueueManager::pushResult(ResultType&& item) {
-		if (mStopped.load(std::memory_order_relaxed)) return false;
-		mResultQueue.enqueue(std::move(item));
-		mResultCv.notify_one();
-		return true;
-	}
+bool QueueManager::popRawBlocking(RawType& out, int timeout_ms) {
+    if (tryPopRaw(out)) return true;
 
-	bool QueueManager::tryPopResult(ResultType& out) {
-		if (mResultQueue.try_dequeue(out)) {
-			return true;
-		}
-		return false;
-	}
+    std::unique_lock<std::mutex> lock(mRawMutex);
+    const auto ready = [this] {
+        return stopped() || mRawCount.load(std::memory_order_acquire) > 0;
+    };
 
-	bool QueueManager::popResultBlocking(ResultType& out, int timeout_ms) {
-		if (tryPopResult(out)) return true;
-		std::unique_lock<std::mutex> lock(mResultMtx);
-		if (timeout_ms < 0) {
-			// 无限等待，直到有数据或停止
-			while (!mStopped.load(std::memory_order_relaxed)) {
-				mResultCv.wait(lock);
-				if (tryPopResult(out)) return true;
-			}
-			return false;
-		}
-		else {
-			auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-			while (!mStopped.load(std::memory_order_relaxed)) {
-				if (mResultCv.wait_until(lock, deadline) == std::cv_status::timeout) {
-					return tryPopResult(out); // 最后再尝试一次
-				}
-				if (tryPopResult(out)) return true;
-			}
-			return false;
-		}
-	}
+    if (timeout_ms < 0) {
+        while (!stopped()) {
+            mRawCv.wait(lock, ready);
+            if (tryPopRaw(out)) return true;
+        }
+        return tryPopRaw(out);
+    }
 
-	std::size_t QueueManager::rawSizeApprox() const {
-		return mRawQueue.size_approx();
-	}
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!stopped()) {
+        if (!mRawCv.wait_until(lock, deadline, ready)) return tryPopRaw(out);
+        if (tryPopRaw(out)) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+    }
+    return tryPopRaw(out);
+}
 
-	std::size_t QueueManager::resultSizeApprox() const {
-		return mResultQueue.size_approx();
-	}
+bool QueueManager::pushResult(const ResultType& item) {
+    if (stopped()) return false;
+    mResultQueue.enqueue(item);
+    mResultCount.fetch_add(1, std::memory_order_release);
+    mResultCv.notify_one();
+    return true;
+}
+
+bool QueueManager::pushResult(ResultType&& item) {
+    if (stopped()) return false;
+    mResultQueue.enqueue(std::move(item));
+    mResultCount.fetch_add(1, std::memory_order_release);
+    mResultCv.notify_one();
+    return true;
+}
+
+bool QueueManager::tryPopResult(ResultType& out) {
+    return tryPop(mResultQueue, mResultCount, out);
+}
+
+bool QueueManager::popResultBlocking(ResultType& out, int timeout_ms) {
+    if (tryPopResult(out)) return true;
+
+    std::unique_lock<std::mutex> lock(mResultMutex);
+    const auto ready = [this] {
+        return stopped() || mResultCount.load(std::memory_order_acquire) > 0;
+    };
+
+    if (timeout_ms < 0) {
+        while (!stopped()) {
+            mResultCv.wait(lock, ready);
+            if (tryPopResult(out)) return true;
+        }
+        return tryPopResult(out);
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!stopped()) {
+        if (!mResultCv.wait_until(lock, deadline, ready)) return tryPopResult(out);
+        if (tryPopResult(out)) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+    }
+    return tryPopResult(out);
+}
+
+std::size_t QueueManager::rawSizeApprox() const noexcept {
+    return mRawCount.load(std::memory_order_acquire);
+}
+
+std::size_t QueueManager::resultSizeApprox() const noexcept {
+    return mResultCount.load(std::memory_order_acquire);
+}
 
 } // namespace XL
