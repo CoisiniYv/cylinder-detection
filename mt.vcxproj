@@ -104,6 +104,7 @@
     <ClCompile Include="Core\detect\trtyolo_slice.cpp" />
     <ClCompile Include="Core\detect_thread.cpp" />
     <ClCompile Include="Core\group_manager.cpp" />
+    <ClCompile Include="Core\inspection_repository.cpp" />
     <ClCompile Include="Core\queue_manager.cpp" />
     <ClCompile Include="Core\Scheduler.cpp" />
     <ClCompile Include="Core\Server.cpp" />
@@ -133,6 +134,7 @@
     <ClInclude Include="Core\detect_thread.hpp" />
     <ClInclude Include="Core\group_manager.hpp" />
     <ClInclude Include="Core\image_types.hpp" />
+    <ClInclude Include="Core\inspection_repository.hpp" />
     <ClInclude Include="Core\queue_manager.hpp" />
     <ClInclude Include="Core\runtime_state.hpp" />
     <ClInclude Include="Core\Scheduler.hpp" />
