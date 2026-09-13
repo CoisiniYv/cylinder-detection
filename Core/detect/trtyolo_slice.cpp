@@ -1,5 +1,7 @@
 #include "trtyolo_slice.hpp"
 
+#include "../Utils/Log.hpp"
+
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_set>
@@ -9,7 +11,9 @@
 namespace trtyolo {
 
 SliceDetector::SliceDetector(std::unique_ptr<DetectModel> model)
-    : model_(std::move(model)) {}
+    : model_(std::move(model)) {
+    if (!model_) throw std::invalid_argument("SliceDetector requires a model");
+}
 
 SliceDetector::SliceDetector(
     const std::string& trt_engine_file,
@@ -27,6 +31,9 @@ DetectRes SliceDetector::process_sliced_images(
     const std::vector<int>& allowed_class_indices) {
     if (slice_infos.empty()) return {};
     if (!model_) throw std::runtime_error("slice detector model is not initialized");
+    if (nms_threshold <= 0.0f || conf_threshold <= 0.0f) {
+        throw std::invalid_argument("slice detector thresholds must be positive");
+    }
 
     const int model_batch_size = model_->batch();
     if (model_batch_size <= 0) {
@@ -172,10 +179,6 @@ void SliceDetector::visualize_sliced_result(
             image, text, cv::Point(label_x, label_y),
             cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(253, 168, 208), 1, cv::LINE_AA);
     }
-}
-
-DetectModel* SliceDetector::get_model() const {
-    return model_.get();
 }
 
 } // namespace trtyolo
