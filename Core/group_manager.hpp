@@ -1,64 +1,63 @@
-﻿#pragma once
+#pragma once
 
 #include "image_types.hpp"
-#include "queue_manager.hpp"
-#include "camera_thread.hpp"
 
-#include <thread>
-#include <atomic>
-#include <mutex>
-#include <unordered_map>
 #include <array>
-#include <functional>
-#include <bitset>
+#include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 
 namespace XL {
 
-	// 组管理器：聚合四面检测结果并在完成时通知相机允许下一组
-	class GroupManager {
-	public:
-		GroupManager();
-		~GroupManager();
+class CameraThread;
 
-		void start();
-		void stop();
-		void join();
-		bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
+// Aggregates per-face worker results into one four-face inspection result.
+// It owns grouping/timeout policy, but not persistence or camera hardware.
+class GroupManager {
+public:
+    GroupManager();
+    ~GroupManager();
 
-		// 设置相机线程引用，用于在组完成时调用 allow_next_group()
-		void setCameraThread(CameraThread* cam) { mCamera = cam; }
+    GroupManager(const GroupManager&) = delete;
+    GroupManager& operator=(const GroupManager&) = delete;
 
-		// 设置组超时（毫秒）。若一组超过此时间仍未收齐四张结果，则立即按当前结果判定，并用缺失部分的默认规则作为NG/GOOD。
-		void setGroupTimeoutMs(int ms) { mGroupTimeoutMs = ms; }
+    void start();
+    void stop();
+    void join();
+    bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
 
-		// 可选：组完成回调（下游可保存、上报或触发其它动作）
-		void setOnGroupComplete(const std::function<void(const QuadFrameResult&)>& cb) { mOnComplete = cb; }
+    void setCameraThread(CameraThread* camera) { mCamera = camera; }
+    void setGroupTimeoutMs(int timeout_ms) { mGroupTimeoutMs = timeout_ms; }
+    void setOnGroupComplete(std::function<void(const QuadFrameResult&)> callback) {
+        mOnComplete = std::move(callback);
+    }
 
-	private:
-		void run();
-		void handleResult(const SingleImageResult& r);
-		bool finalizeGroup(std::uint64_t group_id, bool due_to_timeout);
-		void checkTimeouts();
-		static bool isFaceNG(const SingleImageResult& r);
+private:
+    struct GroupState {
+        std::array<bool, kQuadImageCount> received{};
+        std::array<SingleImageResult, kQuadImageCount> results{};
+        std::chrono::steady_clock::time_point started_at = std::chrono::steady_clock::now();
+        std::uint64_t group_id = 0;
+    };
 
-	private:
-		struct GroupState {
-			std::array<bool, kQuadImageCount> received{ false, false, false, false };
-			std::array<SingleImageResult, kQuadImageCount> results{};
-			std::chrono::steady_clock::time_point start_tp = std::chrono::steady_clock::now();
-			std::uint64_t group_id = 0;
-		};
+    void run();
+    bool handleResult(const SingleImageResult& result);
+    bool finalizeGroup(std::uint64_t group_id, bool timed_out);
+    void checkTimeouts();
+    static bool isFaceNG(const SingleImageResult& result);
 
-		std::unordered_map<std::uint64_t, GroupState> mGroups; // group_id -> state
-		std::mutex mMtx;
-
-		std::atomic<bool> mRunning{ false };
-		std::thread mThread;
-
-		int mGroupTimeoutMs = 0;
-		CameraThread* mCamera = nullptr; // 不拥有
-		std::function<void(const QuadFrameResult&)> mOnComplete;
-	};
+private:
+    std::unordered_map<std::uint64_t, GroupState> mGroups;
+    std::mutex mMutex;
+    std::atomic<bool> mRunning{false};
+    std::thread mThread;
+    int mGroupTimeoutMs = 0;
+    CameraThread* mCamera = nullptr; // non-owning; Scheduler owns the shared camera reference
+    std::function<void(const QuadFrameResult&)> mOnComplete;
+};
 
 } // namespace XL

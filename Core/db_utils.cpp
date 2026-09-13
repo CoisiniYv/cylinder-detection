@@ -1,47 +1,43 @@
-﻿#include "db_utils.hpp"
-#include "sqlite_helper.hpp"
+#include "db_utils.hpp"
+
 #include "Utils/Log.hpp"
+#include "sqlite_helper.hpp"
 
 #include <filesystem>
 
 namespace XL {
 
-	bool ensure_db_initialized(const std::string& dbfile) {
-		try {
-			namespace fs = std::filesystem;
-			fs::path p(dbfile);
-			if (!p.parent_path().empty() && !fs::exists(p.parent_path())) {
-				fs::create_directories(p.parent_path());
-			}
+bool ensure_db_initialized(const std::string& db_file) {
+    try {
+        const std::filesystem::path path(db_file);
+        if (!path.parent_path().empty()) {
+            std::filesystem::create_directories(path.parent_path());
+        }
 
-			SQLiteHelper db(dbfile);
-			db.execute("PRAGMA foreign_keys = OFF;");
-			db.begin();
+        SQLiteHelper db(db_file);
+        db.begin();
 
-			// 运行表
-			const char* ddl_runs = R"(
+        db.execute(R"(
 CREATE TABLE IF NOT EXISTS inspection_runs (
     run_id       TEXT PRIMARY KEY,
     created_time DATETIME DEFAULT (datetime('now','localtime'))
 );
-)";
-			db.execute(ddl_runs);
+)");
 
-			// 目标结构表
-			const char* ddl_groups = R"(
+        db.execute(R"(
 CREATE TABLE IF NOT EXISTS inspection_groups (
     group_pk     INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id       TEXT    NOT NULL,
     group_id     INTEGER NOT NULL,
     device_id    TEXT    NOT NULL,
     status       TEXT    NOT NULL CHECK (status IN ('NG','GOOD')),
-    created_time DEFAULT (datetime('now','localtime')),
+    created_time DATETIME DEFAULT (datetime('now','localtime')),
     UNIQUE(run_id, group_id),
     FOREIGN KEY (run_id) REFERENCES inspection_runs(run_id) ON DELETE CASCADE
 );
-)";
+)");
 
-			const char* ddl_faces = R"(
+        db.execute(R"(
 CREATE TABLE IF NOT EXISTS inspection_faces (
     face_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id        TEXT    NOT NULL,
@@ -50,17 +46,17 @@ CREATE TABLE IF NOT EXISTS inspection_faces (
     saved_path    TEXT    NOT NULL,
     skeleton_path TEXT    NOT NULL,
     original_path TEXT    NOT NULL,
-    created_time  DEFAULT (datetime('now','localtime')),
+    created_time  DATETIME DEFAULT (datetime('now','localtime')),
     UNIQUE(run_id, group_id, face_index),
     FOREIGN KEY (run_id) REFERENCES inspection_runs(run_id) ON DELETE CASCADE
 );
-)";
+)");
 
-			const char* ddl_dets = R"(
+        db.execute(R"(
 CREATE TABLE IF NOT EXISTS defect_detections (
     detection_id INTEGER PRIMARY KEY AUTOINCREMENT,
     face_id      INTEGER NOT NULL,
-    label_id     INTEGER NOT NULL CHECK (label_id BETWEEN -1 AND 6),
+    label_id     INTEGER NOT NULL,
     confidence   REAL    NOT NULL,
     bbox_x       REAL    NOT NULL,
     bbox_y       REAL    NOT NULL,
@@ -68,51 +64,41 @@ CREATE TABLE IF NOT EXISTS defect_detections (
     bbox_h       REAL    NOT NULL,
     length       REAL    NOT NULL,
     area         REAL    NOT NULL,
-    created_time DEFAULT (datetime('now','localtime')),
+    created_time DATETIME DEFAULT (datetime('now','localtime')),
     FOREIGN KEY (face_id) REFERENCES inspection_faces(face_id) ON DELETE CASCADE
 );
-)";
+)");
 
-			// 创建所有表
-			db.execute(ddl_groups);
-			db.execute(ddl_faces);
-			db.execute(ddl_dets);
+        db.execute("CREATE INDEX IF NOT EXISTS idx_groups_device_id ON inspection_groups(device_id);");
+        db.execute("CREATE INDEX IF NOT EXISTS idx_groups_status ON inspection_groups(status);");
+        db.execute("CREATE INDEX IF NOT EXISTS idx_groups_created_time ON inspection_groups(created_time);");
+        db.execute("CREATE INDEX IF NOT EXISTS idx_faces_run_group ON inspection_faces(run_id, group_id);");
+        db.execute("CREATE INDEX IF NOT EXISTS idx_detections_face_id ON defect_detections(face_id);");
+        db.execute("CREATE INDEX IF NOT EXISTS idx_detections_label_id ON defect_detections(label_id);");
 
-			// 索引
-			// inspection_groups 表
-			db.execute("CREATE INDEX IF NOT EXISTS idx_groups_device_id ON inspection_groups(device_id);");
-			db.execute("CREATE INDEX IF NOT EXISTS idx_groups_status ON inspection_groups(status);");
-			db.execute("CREATE INDEX IF NOT EXISTS idx_groups_created_time ON inspection_groups(created_time);");
+        db.commit();
+        return true;
+    }
+    catch (const std::exception& e) {
+        LOGE("database initialization failed: %s", e.what());
+        return false;
+    }
+}
 
-			// inspection_faces 表
-			db.execute("CREATE INDEX IF NOT EXISTS idx_faces_run_group ON inspection_faces(run_id, group_id);");
+bool register_run(const std::string& db_file, const std::string& run_id) {
+    if (run_id.empty()) return false;
 
-			// defect_detections 表
-			db.execute("CREATE INDEX IF NOT EXISTS idx_detections_face_id ON defect_detections(face_id);");
-			db.execute("CREATE INDEX IF NOT EXISTS idx_detections_label_id ON defect_detections(label_id);");
-
-			db.commit();
-			db.execute("PRAGMA foreign_keys = ON;");
-			return true;
-		}
-		catch (const std::exception& e) {
-			LOGE("初始化数据库失败: %s", e.what());
-			return false;
-		}
-	}
-
-	bool register_run(const std::string& dbfile, const std::string& run_id) {
-		try {
-			SQLiteHelper db(dbfile);
-			db.prepare("INSERT OR IGNORE INTO inspection_runs(run_id) VALUES(?);");
-			db.bind(1, run_id);
-			db.step();
-			return true;
-		}
-		catch (const std::exception& e) {
-			LOGE("注册 run_id 失败: %s", e.what());
-			return false;
-		}
-	}
+    try {
+        SQLiteHelper db(db_file);
+        db.prepare("INSERT OR IGNORE INTO inspection_runs(run_id) VALUES(?);");
+        db.bind(1, run_id);
+        db.step();
+        return true;
+    }
+    catch (const std::exception& e) {
+        LOGE("run registration failed: %s", e.what());
+        return false;
+    }
+}
 
 } // namespace XL

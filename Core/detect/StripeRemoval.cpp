@@ -1,121 +1,175 @@
 #include "StripeRemoval.h"
 
-#include <limits>
+#include <opencv2/core.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/photo/cuda.hpp>
 
-StripeRemoval::StripeRemoval(int fw, double af)
-	: filter_width(fw), attenuation_factor(af) {
+#include <omp.h>
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <limits>
+#include <stdexcept>
+#include <vector>
+
+namespace {
+
+void swapFrequencyQuadrants(
+    cv::cuda::GpuMat& real,
+    cv::cuda::GpuMat& imaginary,
+    cv::cuda::Stream& stream) {
+    const int half_width = real.cols / 2;
+    const int half_height = real.rows / 2;
+    if (half_width <= 0 || half_height <= 0) return;
+
+    cv::cuda::GpuMat q0_real(real, cv::Rect(0, 0, half_width, half_height));
+    cv::cuda::GpuMat q1_real(real, cv::Rect(half_width, 0, half_width, half_height));
+    cv::cuda::GpuMat q2_real(real, cv::Rect(0, half_height, half_width, half_height));
+    cv::cuda::GpuMat q3_real(real, cv::Rect(half_width, half_height, half_width, half_height));
+
+    cv::cuda::GpuMat q0_imag(imaginary, cv::Rect(0, 0, half_width, half_height));
+    cv::cuda::GpuMat q1_imag(imaginary, cv::Rect(half_width, 0, half_width, half_height));
+    cv::cuda::GpuMat q2_imag(imaginary, cv::Rect(0, half_height, half_width, half_height));
+    cv::cuda::GpuMat q3_imag(imaginary, cv::Rect(half_width, half_height, half_width, half_height));
+
+    cv::cuda::GpuMat temp_real;
+    cv::cuda::GpuMat temp_imag;
+
+    q0_real.copyTo(temp_real, stream);
+    q0_imag.copyTo(temp_imag, stream);
+    q3_real.copyTo(q0_real, stream);
+    q3_imag.copyTo(q0_imag, stream);
+    temp_real.copyTo(q3_real, stream);
+    temp_imag.copyTo(q3_imag, stream);
+
+    q1_real.copyTo(temp_real, stream);
+    q1_imag.copyTo(temp_imag, stream);
+    q2_real.copyTo(q1_real, stream);
+    q2_imag.copyTo(q1_imag, stream);
+    temp_real.copyTo(q2_real, stream);
+    temp_imag.copyTo(q2_imag, stream);
 }
 
-int StripeRemoval::detect_strongest_direction(const cv::cuda::GpuMat& d_magnitude_spectrum,
-	double inner_ratio,
-	double outer_ratio,
-	int target_angle,
-	int angle_tolerance) {
-	// 将幅度谱下载到CPU进行高效并行分析（OpenMP），总体上对大图性能更稳定
-	if (d_magnitude_spectrum.empty()) {
-		throw std::invalid_argument("幅度谱为空");
-	}
-	cv::Mat magnitude_spectrum;
-	d_magnitude_spectrum.download(magnitude_spectrum);
+} // namespace
 
-	int rows = magnitude_spectrum.rows;
-	int cols = magnitude_spectrum.cols;
-	int center_row = rows / 2;
-	int center_col = cols / 2;
+int StripeRemoval::detect_strongest_direction(
+    const cv::cuda::GpuMat& magnitude_spectrum,
+    double inner_ratio,
+    double outer_ratio,
+    int target_angle,
+    int angle_tolerance) {
+    if (magnitude_spectrum.empty()) {
+        throw std::invalid_argument("magnitude spectrum is empty");
+    }
+    if (inner_ratio < 0.0 || outer_ratio <= inner_ratio || outer_ratio > 1.0) {
+        throw std::invalid_argument("invalid stripe frequency radius ratios");
+    }
+    if (angle_tolerance < 0 || angle_tolerance > 180) {
+        throw std::invalid_argument("invalid stripe angle tolerance");
+    }
 
-	double min_radius = std::min(rows, cols) * inner_ratio;
-	double max_radius = std::min(rows, cols) * outer_ratio;
+    cv::Mat spectrum_cpu;
+    magnitude_spectrum.download(spectrum_cpu);
 
-	std::vector<double> angular_profile(360, 0.0);
-	std::vector<int> angle_counts(360, 0);
+    const int rows = spectrum_cpu.rows;
+    const int cols = spectrum_cpu.cols;
+    const int center_row = rows / 2;
+    const int center_col = cols / 2;
+    const double min_radius = std::min(rows, cols) * inner_ratio;
+    const double max_radius = std::min(rows, cols) * outer_ratio;
 
-	// 预计算列偏移以减少内层计算量
-	std::vector<double> x_offsets(cols);
-	for (int j = 0; j < cols; ++j) x_offsets[j] = static_cast<double>(j - center_col);
+    std::vector<double> angular_profile(360, 0.0);
+    std::vector<int> angle_counts(360, 0);
+    std::vector<double> x_offsets(static_cast<std::size_t>(cols));
+    for (int column = 0; column < cols; ++column) {
+        x_offsets[static_cast<std::size_t>(column)] = static_cast<double>(column - center_col);
+    }
 
-	// OpenMP 并行累加角度剖面
 #pragma omp parallel
-	{
-		std::vector<double> local_profile(360, 0.0);
-		std::vector<int> local_counts(360, 0);
+    {
+        std::vector<double> local_profile(360, 0.0);
+        std::vector<int> local_counts(360, 0);
 
 #pragma omp for schedule(static)
-		for (int i = 0; i < rows; ++i) {
-			double y = static_cast<double>(center_row - i);
-			const float* mag_row = magnitude_spectrum.ptr<float>(i);
-			for (int j = 0; j < cols; ++j) {
-				double x = x_offsets[j];
-				double r = std::sqrt(x * x + y * y);
-				if (r >= min_radius && r <= max_radius) {
-					double angle = std::atan2(-y, x) * 180.0 / CV_PI;
-					angle = std::fmod(angle + 360.0, 360.0);
-					int angle_idx = static_cast<int>(angle);
-					if (angle_idx >= 0 && angle_idx < 360) {
-						float mag_val = mag_row[j];
-						local_profile[angle_idx] += static_cast<double>(mag_val);
-						local_counts[angle_idx]++;
-					}
-				}
-			}
-		}
+        for (int row = 0; row < rows; ++row) {
+            const double y = static_cast<double>(center_row - row);
+            const float* values = spectrum_cpu.ptr<float>(row);
+            for (int column = 0; column < cols; ++column) {
+                const double x = x_offsets[static_cast<std::size_t>(column)];
+                const double radius = std::sqrt(x * x + y * y);
+                if (radius < min_radius || radius > max_radius) continue;
 
-		// 归并到全局
+                double angle = std::atan2(-y, x) * 180.0 / CV_PI;
+                angle = std::fmod(angle + 360.0, 360.0);
+                const int angle_index = static_cast<int>(angle);
+                if (angle_index < 0 || angle_index >= 360) continue;
+
+                local_profile[static_cast<std::size_t>(angle_index)] += values[column];
+                local_counts[static_cast<std::size_t>(angle_index)] += 1;
+            }
+        }
+
 #pragma omp critical
-		{
-			for (int k = 0; k < 360; ++k) {
-				angular_profile[k] += local_profile[k];
-				angle_counts[k] += local_counts[k];
-			}
-		}
-	}
+        {
+            for (int angle = 0; angle < 360; ++angle) {
+                angular_profile[static_cast<std::size_t>(angle)] +=
+                    local_profile[static_cast<std::size_t>(angle)];
+                angle_counts[static_cast<std::size_t>(angle)] +=
+                    local_counts[static_cast<std::size_t>(angle)];
+            }
+        }
+    }
 
-	// 计算平均值
-	for (int i = 0; i < 360; ++i) {
-		if (angle_counts[i] > 0) {
-			angular_profile[i] /= angle_counts[i];
-		}
-	}
+    for (int angle = 0; angle < 360; ++angle) {
+        const int count = angle_counts[static_cast<std::size_t>(angle)];
+        if (count > 0) angular_profile[static_cast<std::size_t>(angle)] /= count;
+    }
 
-	// 高斯平滑并在目标窗口内查找最强角度（on-the-fly 最大值）
-	double sigma = 5.0;
-	int kernel_radius = 15;
-	int start_angle = (target_angle - angle_tolerance + 360) % 360;
-	int end_angle = (target_angle + angle_tolerance) % 360;
+    constexpr double kSigma = 5.0;
+    constexpr int kKernelRadius = 15;
+    const int normalized_target = (target_angle % 360 + 360) % 360;
+    const int start_angle = (normalized_target - angle_tolerance + 360) % 360;
+    const int end_angle = (normalized_target + angle_tolerance) % 360;
 
-	auto smooth_at = [&](int angle_index) -> double {
-		double sum = 0.0, weight_sum = 0.0;
-		for (int j = -kernel_radius; j <= kernel_radius; ++j) {
-			int idx = (angle_index + j + 360) % 360;
-			double weight = std::exp(-(j * j) / (2.0 * sigma * sigma));
-			sum += angular_profile[idx] * weight;
-			weight_sum += weight;
-		}
-		return sum / weight_sum;
-		};
+    auto smoothedValue = [&](int angle_index) {
+        double sum = 0.0;
+        double weight_sum = 0.0;
+        for (int offset = -kKernelRadius; offset <= kKernelRadius; ++offset) {
+            const int index = (angle_index + offset + 360) % 360;
+            const double weight = std::exp(
+                -(offset * offset) / (2.0 * kSigma * kSigma));
+            sum += angular_profile[static_cast<std::size_t>(index)] * weight;
+            weight_sum += weight;
+        }
+        return weight_sum > 0.0 ? sum / weight_sum : 0.0;
+    };
 
-	int strongest_angle = target_angle;
-	double max_val = -std::numeric_limits<double>::infinity();
-	if (start_angle <= end_angle) {
-		for (int i = start_angle; i <= end_angle; ++i) {
-			double val = smooth_at(i);
-			if (val > max_val) { max_val = val; strongest_angle = i; }
-		}
-	}
-	else {
-		for (int i = start_angle; i < 360; ++i) {
-			double val = smooth_at(i);
-			if (val > max_val) { max_val = val; strongest_angle = i; }
-		}
-		for (int i = 0; i <= end_angle; ++i) {
-			double val = smooth_at(i);
-			if (val > max_val) { max_val = val; strongest_angle = i; }
-		}
-	}
+    int strongest_angle = normalized_target;
+    double strongest_value = -std::numeric_limits<double>::infinity();
+    auto inspectAngle = [&](int angle) {
+        const double value = smoothedValue(angle);
+        if (value > strongest_value) {
+            strongest_value = value;
+            strongest_angle = angle;
+        }
+    };
 
-	return -strongest_angle;
+    if (start_angle <= end_angle) {
+        for (int angle = start_angle; angle <= end_angle; ++angle) inspectAngle(angle);
+    }
+    else {
+        for (int angle = start_angle; angle < 360; ++angle) inspectAngle(angle);
+        for (int angle = 0; angle <= end_angle; ++angle) inspectAngle(angle);
+    }
+
+    return -strongest_angle;
 }
 
-cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_image,
+cv::cuda::GpuMat StripeRemoval::remove_image_stripes(
+    const cv::cuda::GpuMat& image,
     const std::string& output_path,
     int filter_width,
     double attenuation_factor,
@@ -123,210 +177,160 @@ cv::cuda::GpuMat StripeRemoval::remove_image_stripes(const cv::cuda::GpuMat& d_i
     int angle_tolerance,
     bool enable_denoising,
     float denoise_h,
-    float denoise_hColor,
-    int denoise_searchWindowSize,
-    int denoise_templateWindowSize,
+    float denoise_h_color,
+    int denoise_search_window_size,
+    int denoise_template_window_size,
     cv::cuda::Stream& stream) {
+    if (image.empty()) throw std::invalid_argument("stripe-removal input is empty");
+    if (filter_width < 0) throw std::invalid_argument("filter_width must be non-negative");
+    if (attenuation_factor < 0.0 || attenuation_factor > 1.0) {
+        throw std::invalid_argument("attenuation_factor must be in [0, 1]");
+    }
+    if (image.channels() != 1 && image.channels() != 3 && image.channels() != 4) {
+        throw std::invalid_argument("stripe removal supports only 1, 3 or 4 channel images");
+    }
 
-	auto total_start_time = std::chrono::high_resolution_clock::now();
-	this->filter_width = filter_width;
-	this->attenuation_factor = attenuation_factor;
+    cv::cuda::GpuMat source = image;
+    if (source.channels() == 1) {
+        cv::cuda::GpuMat converted;
+        cv::cuda::cvtColor(source, converted, cv::COLOR_GRAY2BGR, 0, stream);
+        source = converted;
+    }
+    else if (source.channels() == 4) {
+        cv::cuda::GpuMat converted;
+        cv::cuda::cvtColor(source, converted, cv::COLOR_BGRA2BGR, 0, stream);
+        source = converted;
+    }
 
-	try {
-		// 输入统一为 GpuMat，确保为3通道BGR
-		cv::cuda::GpuMat d_src = d_image;
-		if (d_src.empty()) {
-			throw std::runtime_error("Input GpuMat is empty");
-		}
-        if (d_src.channels() == 1) {
-            cv::cuda::GpuMat d_tmp;
-            cv::cuda::cvtColor(d_src, d_tmp, cv::COLOR_GRAY2BGR, 0, stream);
-            d_src = d_tmp;
+    cv::cuda::GpuMat source_float;
+    source.convertTo(source_float, CV_32FC3, 1.0, 0.0, stream);
+
+    std::vector<cv::cuda::GpuMat> channels;
+    cv::cuda::split(source_float, channels, stream);
+    std::vector<cv::cuda::GpuMat> real_parts(channels.size());
+    std::vector<cv::cuda::GpuMat> imaginary_parts(channels.size());
+
+    cv::cuda::GpuMat magnitude_spectrum;
+    cv::Size padded_size;
+
+    for (std::size_t channel_index = 0; channel_index < channels.size(); ++channel_index) {
+        const cv::cuda::GpuMat& channel = channels[channel_index];
+        const int padded_rows = cv::getOptimalDFTSize(channel.rows);
+        const int padded_cols = cv::getOptimalDFTSize(channel.cols);
+        padded_size = cv::Size(padded_cols, padded_rows);
+
+        cv::cuda::GpuMat padded(padded_rows, padded_cols, CV_32F);
+        padded.setTo(cv::Scalar::all(0), stream);
+        channel.copyTo(
+            padded(cv::Rect(0, 0, channel.cols, channel.rows)),
+            stream);
+
+        cv::cuda::GpuMat planes[2];
+        padded.copyTo(planes[0], stream);
+        planes[1].create(padded_rows, padded_cols, CV_32F);
+        planes[1].setTo(cv::Scalar::all(0), stream);
+
+        cv::cuda::GpuMat complex_image;
+        cv::cuda::merge(planes, 2, complex_image, stream);
+        cv::cuda::dft(complex_image, complex_image, complex_image.size(), 0, stream);
+        cv::cuda::split(complex_image, planes, stream);
+
+        swapFrequencyQuadrants(planes[0], planes[1], stream);
+        planes[0].copyTo(real_parts[channel_index], stream);
+        planes[1].copyTo(imaginary_parts[channel_index], stream);
+
+        if (channel_index == 0) {
+            cv::cuda::magnitude(planes[0], planes[1], magnitude_spectrum, stream);
         }
-        else if (d_src.channels() == 4) {
-            cv::cuda::GpuMat d_tmp;
-            cv::cuda::cvtColor(d_src, d_tmp, cv::COLOR_BGRA2BGR, 0, stream);
-            d_src = d_tmp;
+    }
+
+    // Direction analysis runs on CPU. Synchronize the producer stream before
+    // the default-stream download in detect_strongest_direction().
+    stream.waitForCompletion();
+    const int strongest_angle = detect_strongest_direction(
+        magnitude_spectrum, 0.12, 0.18, target_angle, angle_tolerance);
+
+    cv::Mat mask(padded_size, CV_32F, cv::Scalar(1.0f));
+    const int center_x = padded_size.width / 2;
+    const int center_y = padded_size.height / 2;
+    const double theta = strongest_angle * (CV_PI / 180.0);
+    const double cosine = std::cos(theta);
+    const double sine = std::sin(theta);
+    for (int row = 0; row < mask.rows; ++row) {
+        float* mask_row = mask.ptr<float>(row);
+        const double v = static_cast<double>(center_y - row);
+        for (int column = 0; column < mask.cols; ++column) {
+            const double u = static_cast<double>(column - center_x);
+            const double distance = std::abs(u * sine - v * cosine);
+            if (distance <= filter_width && !(row == center_y && column == center_x)) {
+                mask_row[column] = static_cast<float>(attenuation_factor);
+            }
         }
+    }
 
-		// 转换到32F以进行频域处理
-		cv::cuda::GpuMat d_src_f32;
-        d_src.convertTo(d_src_f32, CV_32FC3, 1.0, 0.0, stream);
+    cv::cuda::GpuMat mask_gpu;
+    mask_gpu.upload(mask, stream);
 
-		// 拆分通道
-		std::vector<cv::cuda::GpuMat> d_channels;
-        cv::cuda::split(d_src_f32, d_channels, stream);
+    std::vector<cv::cuda::GpuMat> processed_channels(channels.size());
+    for (std::size_t channel_index = 0; channel_index < channels.size(); ++channel_index) {
+        cv::cuda::GpuMat real = real_parts[channel_index];
+        cv::cuda::GpuMat imaginary = imaginary_parts[channel_index];
+        cv::cuda::multiply(real, mask_gpu, real, 1.0, -1, stream);
+        cv::cuda::multiply(imaginary, mask_gpu, imaginary, 1.0, -1, stream);
+        swapFrequencyQuadrants(real, imaginary, stream);
 
-		std::vector<cv::cuda::GpuMat> d_real_parts(d_channels.size());
-		std::vector<cv::cuda::GpuMat> d_imag_parts(d_channels.size());
+        cv::cuda::GpuMat filtered_planes[2]{real, imaginary};
+        cv::cuda::GpuMat filtered_complex;
+        cv::cuda::merge(filtered_planes, 2, filtered_complex, stream);
 
-		cv::cuda::GpuMat d_magnitude_spectrum;
-		cv::Size padded_size;
+        cv::cuda::GpuMat inverse_complex;
+        cv::cuda::dft(
+            filtered_complex,
+            inverse_complex,
+            filtered_complex.size(),
+            cv::DFT_INVERSE | cv::DFT_SCALE,
+            stream);
 
-		for (int c = 0; c < static_cast<int>(d_channels.size()); ++c) {
-			cv::cuda::GpuMat d_channel = d_channels[c];
+        cv::cuda::GpuMat time_planes[2];
+        cv::cuda::split(inverse_complex, time_planes, stream);
+        cv::cuda::GpuMat cropped = time_planes[0](
+            cv::Rect(0, 0, channels[channel_index].cols, channels[channel_index].rows));
+        cv::cuda::max(cropped, 0.0, cropped, stream);
+        cropped.copyTo(processed_channels[channel_index], stream);
+    }
 
-			// 计算最佳DFT尺寸并进行填充
-			int m = cv::getOptimalDFTSize(d_channel.rows);
-			int n = cv::getOptimalDFTSize(d_channel.cols);
-			padded_size = cv::Size(n, m);
+    cv::cuda::GpuMat processed_float;
+    cv::cuda::merge(processed_channels, processed_float, stream);
+    cv::cuda::GpuMat processed_u8;
+    processed_float.convertTo(processed_u8, CV_8UC3, 1.0, 0.0, stream);
 
-			cv::cuda::GpuMat d_padded(m, n, CV_32F);
-            d_padded.setTo(cv::Scalar::all(0), stream);
-			cv::Rect roi(0, 0, d_channel.cols, d_channel.rows);
-            d_channel.copyTo(d_padded(roi), stream);
+    cv::cuda::GpuMat result;
+    if (enable_denoising) {
+        cv::cuda::fastNlMeansDenoisingColored(
+            processed_u8,
+            result,
+            denoise_h,
+            denoise_h_color,
+            denoise_search_window_size,
+            denoise_template_window_size,
+            stream);
+    }
+    else {
+        result = processed_u8;
+    }
 
-			// 创建复数矩阵（实部+虚部）
-			cv::cuda::GpuMat d_planes[2];
-            d_padded.copyTo(d_planes[0], stream);
-            d_planes[1].create(m, n, CV_32F);
-            d_planes[1].setTo(cv::Scalar::all(0), stream);
-
-			cv::cuda::GpuMat d_complexI;
-            cv::cuda::merge(d_planes, 2, d_complexI, stream);
-
-			// 执行GPU版DFT
-            cv::cuda::dft(d_complexI, d_complexI, d_complexI.size(), 0, stream);
-
-			// 分离实部和虚部
-            cv::cuda::split(d_complexI, d_planes, stream);
-			cv::cuda::GpuMat d_real_part = d_planes[0];
-			cv::cuda::GpuMat d_imag_part = d_planes[1];
-
-			// 频谱中心化（GPU上执行）
-			int cx = d_real_part.cols / 2;
-			int cy = d_real_part.rows / 2;
-
-			cv::cuda::GpuMat q0_real(d_real_part, cv::Rect(0, 0, cx, cy));
-			cv::cuda::GpuMat q1_real(d_real_part, cv::Rect(cx, 0, cx, cy));
-			cv::cuda::GpuMat q2_real(d_real_part, cv::Rect(0, cy, cx, cy));
-			cv::cuda::GpuMat q3_real(d_real_part, cv::Rect(cx, cy, cx, cy));
-
-			cv::cuda::GpuMat q0_imag(d_imag_part, cv::Rect(0, 0, cx, cy));
-			cv::cuda::GpuMat q1_imag(d_imag_part, cv::Rect(cx, 0, cx, cy));
-			cv::cuda::GpuMat q2_imag(d_imag_part, cv::Rect(0, cy, cx, cy));
-			cv::cuda::GpuMat q3_imag(d_imag_part, cv::Rect(cx, cy, cx, cy));
-
-			cv::cuda::GpuMat tmp_real, tmp_imag;
-            q0_real.copyTo(tmp_real, stream); q0_imag.copyTo(tmp_imag, stream);
-            q3_real.copyTo(q0_real, stream); q3_imag.copyTo(q0_imag, stream);
-            tmp_real.copyTo(q3_real, stream); tmp_imag.copyTo(q3_imag, stream);
-
-            q1_real.copyTo(tmp_real, stream); q1_imag.copyTo(tmp_imag, stream);
-            q2_real.copyTo(q1_real, stream); q2_imag.copyTo(q1_imag, stream);
-            tmp_real.copyTo(q2_real, stream); tmp_imag.copyTo(q2_imag, stream);
-
-            d_real_part.copyTo(d_real_parts[c], stream);
-            d_imag_part.copyTo(d_imag_parts[c], stream);
-
-			// 第一个通道计算幅度谱用于方向检测（保留在GPU）
-			if (c == 0) {
-                cv::cuda::magnitude(d_real_part, d_imag_part, d_magnitude_spectrum, stream);
-			}
-		}
-
-		// 检测最强方向
-		int strongest_angle = detect_strongest_direction(d_magnitude_spectrum, 0.12, 0.18, target_angle, angle_tolerance);
-
-		// 预先构建频域掩模（CPU一次性计算，GPU应用）
-		cv::Mat mask(padded_size, CV_32F, cv::Scalar(1.0f));
-		int center_x = padded_size.width / 2;
-		int center_y = padded_size.height / 2;
-		double theta_rad = strongest_angle * (CV_PI / 180.0);
-		double cos_theta = std::cos(theta_rad);
-		double sin_theta = std::sin(theta_rad);
-		for (int i = 0; i < mask.rows; ++i) {
-			float* mptr = mask.ptr<float>(i);
-			double v = static_cast<double>(center_y - i);
-			for (int j = 0; j < mask.cols; ++j) {
-				double u = static_cast<double>(j - center_x);
-				double distance = std::abs(u * sin_theta - v * cos_theta);
-				if (distance <= filter_width && !(i == center_y && j == center_x)) {
-					mptr[j] = static_cast<float>(attenuation_factor);
-				}
-			}
-		}
-		cv::cuda::GpuMat d_mask;
-        d_mask.upload(mask, stream);
-
-		// 应用掩模并逆中心化、逆变换
-		std::vector<cv::cuda::GpuMat> d_processed_channels(d_channels.size());
-		for (int c = 0; c < static_cast<int>(d_channels.size()); ++c) {
-			cv::cuda::GpuMat d_real = d_real_parts[c];
-			cv::cuda::GpuMat d_imag = d_imag_parts[c];
-
-            cv::cuda::multiply(d_real, d_mask, d_real, 1.0, -1, stream);
-            cv::cuda::multiply(d_imag, d_mask, d_imag, 1.0, -1, stream);
-
-			// 逆中心化
-			int cx = d_real.cols / 2;
-			int cy = d_real.rows / 2;
-			cv::cuda::GpuMat q0_real(d_real, cv::Rect(0, 0, cx, cy));
-			cv::cuda::GpuMat q1_real(d_real, cv::Rect(cx, 0, cx, cy));
-			cv::cuda::GpuMat q2_real(d_real, cv::Rect(0, cy, cx, cy));
-			cv::cuda::GpuMat q3_real(d_real, cv::Rect(cx, cy, cx, cy));
-
-			cv::cuda::GpuMat q0_imag(d_imag, cv::Rect(0, 0, cx, cy));
-			cv::cuda::GpuMat q1_imag(d_imag, cv::Rect(cx, 0, cx, cy));
-			cv::cuda::GpuMat q2_imag(d_imag, cv::Rect(0, cy, cx, cy));
-			cv::cuda::GpuMat q3_imag(d_imag, cv::Rect(cx, cy, cx, cy));
-
-			cv::cuda::GpuMat tmp_real, tmp_imag;
-            q0_real.copyTo(tmp_real, stream); q0_imag.copyTo(tmp_imag, stream);
-            q3_real.copyTo(q0_real, stream); q3_imag.copyTo(q0_imag, stream);
-            tmp_real.copyTo(q3_real, stream); tmp_imag.copyTo(q3_imag, stream);
-
-            q1_real.copyTo(tmp_real, stream); q1_imag.copyTo(tmp_imag, stream);
-            q2_real.copyTo(q1_real, stream); q2_imag.copyTo(q1_imag, stream);
-            tmp_real.copyTo(q2_real, stream); tmp_imag.copyTo(q2_imag, stream);
-
-			// 合并并逆DFT
-			cv::cuda::GpuMat d_filtered_planes[2]{ d_real, d_imag };
-			cv::cuda::GpuMat d_complex_filtered;
-            cv::cuda::merge(d_filtered_planes, 2, d_complex_filtered, stream);
-
-			cv::cuda::GpuMat d_inverse_complex;
-            cv::cuda::dft(d_complex_filtered, d_inverse_complex, d_complex_filtered.size(), cv::DFT_INVERSE | cv::DFT_SCALE, stream);
-
-			// 取实部作为时域结果
-			cv::cuda::GpuMat d_time_planes[2];
-            cv::cuda::split(d_inverse_complex, d_time_planes, stream);
-			cv::cuda::GpuMat d_time = d_time_planes[0];
-
-			// 裁剪到原始大小并阈值到非负
-			cv::cuda::GpuMat d_processed = d_time(cv::Rect(0, 0, d_channels[c].cols, d_channels[c].rows));
-            cv::cuda::max(d_processed, 0.0, d_processed, stream);
-            d_processed.copyTo(d_processed_channels[c], stream);
-		}
-
-		// 合并通道并转换到8U
-		cv::cuda::GpuMat d_processed_image;
-        cv::cuda::merge(d_processed_channels, d_processed_image, stream);
-		cv::cuda::GpuMat d_output_u8;
-        d_processed_image.convertTo(d_output_u8, CV_8UC3, 1.0, 0.0, stream);
-
-		// 非局部均值去噪
-		cv::cuda::GpuMat d_final;
-        if (enable_denoising) {
-            cv::cuda::fastNlMeansDenoisingColored(d_output_u8, d_final, denoise_h, denoise_hColor, denoise_searchWindowSize, denoise_templateWindowSize, stream);
+    if (!output_path.empty()) {
+        const std::filesystem::path file(output_path);
+        if (!file.parent_path().empty()) {
+            std::filesystem::create_directories(file.parent_path());
         }
-		else {
-			d_final = d_output_u8;
-		}
+        cv::Mat result_cpu;
+        result.download(result_cpu, stream);
+        stream.waitForCompletion();
+        if (!cv::imwrite(file.string(), result_cpu)) {
+            throw std::runtime_error("failed to save stripe-removal output: " + file.string());
+        }
+    }
 
-		// 可选保存输出
-		if (!output_path.empty()) {
-			std::filesystem::create_directories(std::filesystem::path(output_path).parent_path());
-			cv::Mat out_cpu;
-            d_final.download(out_cpu, stream);
-			if (!cv::imwrite(output_path, out_cpu)) {
-				throw std::runtime_error("Failed to save processed image to: " + output_path);
-			}
-		}
-
-		return d_final;
-	}
-	catch (const std::exception&) {
-		throw;
-	}
+    return result;
 }

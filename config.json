@@ -1,14 +1,17 @@
 {
-    "version": "3.99",
-    "ip": "10.37.57.112",
-    "analyzerPort": 9003,
+  "version": "4.0",
+  "host": "127.0.0.1",
+  "analyzerPort": 9003,
 
+  "modelDir": "./models",
+  "uploadDir": "./output",
+  "dbPath": "./data/my_inspection.db",
 
-    "modelDir": "E:\\ydk\\resource\\models",
-    "uploadDir": "E:\\ydk\\resource\\output",
-    "dbPath": "E:\\ydk\\resource\\my_inspection.db",
+  "gpuDevice": 0,
+  "detectThreads": 4,
+  "groupTimeoutMs": 55000,
 
-    "slidePort": "",
-    "slideAxisId": 0,
-    "slideTimeoutMs": 20000
+  "slidePort": "",
+  "slideAxisId": 0,
+  "slideTimeoutMs": 20000
 }

@@ -1,456 +1,734 @@
-﻿#include "engineTRT.h"
-#include "logging.h"
-#include "cuda_utils.h"
-#include "config.h"
+#include "engineTRT.h"
 
-#include <filesystem>
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
+#include "config.h"
+#include "logging.h"
+
 #include <NvOnnxParser.h>
 #include <cuda_runtime_api.h>
 
-static Logger gLogger;
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
-// 辅助函数：将Dims64转换为Dims（保持头文件不变）
-static nvinfer1::Dims toDims32(const nvinfer1::Dims64& d64)
-{
-	nvinfer1::Dims d{};
-	d.nbDims = static_cast<int>(d64.nbDims);
-	for (int i = 0; i < d.nbDims && i < nvinfer1::Dims::MAX_DIMS; ++i)
-	{
-		d.d[i] = static_cast<int>(d64.d[i]);
-	}
-	return d;
+namespace {
+
+Logger gLogger;
+
+void checkCuda(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(operation) + " failed: " + cudaGetErrorString(status));
+    }
 }
 
-// 辅助函数：根据Dims64计算大小
-static size_t getSizeByDim64(const nvinfer1::Dims64& dims)
-{
-	size_t size = 1;
-	for (int i = 0; i < dims.nbDims; ++i)
-	{
-		const int64_t di = dims.d[i];
-		if (di == -1)
-			size *= MAX_NUM_PROMPTS;
-		else
-			size *= static_cast<size_t>(di);
-	}
-	return size;
+nvinfer1::Dims toDims32(const nvinfer1::Dims64& dims64) {
+    nvinfer1::Dims dims{};
+    dims.nbDims = static_cast<int>(dims64.nbDims);
+    for (int i = 0; i < dims.nbDims && i < nvinfer1::Dims::MAX_DIMS; ++i) {
+        dims.d[i] = static_cast<int>(dims64.d[i]);
+    }
+    return dims;
 }
 
-std::string getFileExtension(const std::string& filePath) {
-	// 在文件路径中查找最后一个点的位置
-	size_t dotPos = filePath.find_last_of(".");
-	// 如果找到点，则提取点后面的子串作为文件扩展名并返回
-	if (dotPos != std::string::npos) {
-		return filePath.substr(dotPos + 1);
-	}
-	// 如果未找到扩展名，则返回空字符串
-	return "";
+std::size_t getSizeByDim64(const nvinfer1::Dims64& dims) {
+    std::size_t size = 1;
+    for (int i = 0; i < dims.nbDims; ++i) {
+        const std::int64_t dimension = dims.d[i];
+        if (dimension == -1) {
+            size *= MAX_NUM_PROMPTS;
+        }
+        else if (dimension > 0) {
+            size *= static_cast<std::size_t>(dimension);
+        }
+        else {
+            throw std::runtime_error("TensorRT tensor has an invalid dimension");
+        }
+    }
+    return size;
 }
 
-EngineTRT::EngineTRT(std::string modelPath, std::vector<std::string> inputNames, std::vector<std::string> outputNames, bool isDynamicShape, bool isFP16) {
-	// 检查模型文件是否具有".onnx"扩展名
-	if (getFileExtension(modelPath) == "onnx") {
-		// 如果文件是ONNX模型，则使用提供的参数构建引擎
-		build(modelPath, inputNames, outputNames, isDynamicShape, isFP16);
-	}
-	else {
-		// 如果文件不是ONNX模型，则反序列化现有引擎
-		deserializeEngine(modelPath, inputNames, outputNames);
-	}
+bool hasOnnxExtension(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return extension == ".onnx";
+}
+
+} // namespace
+
+EngineTRT::EngineTRT(
+    const std::string& model_path,
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names,
+    bool dynamic_shape,
+    bool fp16) {
+    if (model_path.empty()) {
+        throw std::invalid_argument("TensorRT model path is empty");
+    }
+    if (input_names.empty() || output_names.empty()) {
+        throw std::invalid_argument("TensorRT input/output tensor names must not be empty");
+    }
+
+    try {
+        if (hasOnnxExtension(model_path)) {
+            build(model_path, input_names, output_names, dynamic_shape, fp16);
+        }
+        else {
+            deserializeEngine(model_path, input_names, output_names);
+        }
+    }
+    catch (...) {
+        // Destructors are not invoked when a constructor throws. Explicitly
+        // release any TensorRT/CUDA objects created before the failure point.
+        releaseResources();
+        throw;
+    }
 }
 
 EngineTRT::~EngineTRT() {
-	// 释放CUDA流
-	cudaStreamDestroy(mCudaStream);
-	// 释放为推理分配的GPU缓冲区
-	for (int i = 0; i < mGpuBuffers.size(); i++)
-		CUDA_CHECK(cudaFree(mGpuBuffers[i]));
-	// 释放CPU缓冲区
-	for (int i = 0; i < mCpuBuffers.size(); i++)
-		delete[] mCpuBuffers[i];
-
-	// 清理并销毁TensorRT引擎组件
-	delete mContext;  // 销毁执行上下文
-	delete mEngine;   // 销毁引擎
-	delete mRuntime;  // 销毁运行时
+    releaseResources();
 }
 
-void EngineTRT::build(std::string onnxPath, std::vector<std::string> inputNames, std::vector<std::string> outputNames, bool isDynamicShape, bool isFP16)
-{
-	// 检查ONNX文件是否存在。如果不存在，打印错误消息并返回。
-	if (!std::filesystem::exists(onnxPath)) {
-		std::cerr << "ONNX file not found: " << onnxPath << std::endl;
-		return;  // 如果ONNX文件缺失，提前退出
-	}
+void EngineTRT::releaseBuffers() noexcept {
+    for (void*& buffer : mGpuBuffers) {
+        if (buffer) {
+            (void)cudaFree(buffer);
+            buffer = nullptr;
+        }
+    }
+    for (float*& buffer : mCpuBuffers) {
+        delete[] buffer;
+        buffer = nullptr;
+    }
 
-	// 创建一个推理构建器，用于构建TensorRT引擎。
-	auto builder = nvinfer1::createInferBuilder(gLogger);
-	assert(builder != nullptr);  // 确保构建器成功创建
+    mGpuBuffers.clear();
+    mCpuBuffers.clear();
+    mBufferBindingBytes.clear();
+    mBufferBindingSizes.clear();
 
-	// 使用显式批处理大小，这是ONNX模型所需的。
-	const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-	nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicitBatch);
-	assert(network != nullptr);  // 确保网络成功创建
-
-	// 创建一个构建器配置对象，用于设置选项，如FP16精度。
-	nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
-	assert(config != nullptr);  // 确保配置成功创建
-
-	// 如果需要动态形状支持，配置优化配置文件。
-	if (isDynamicShape) // 仅设计用于NanoSAM掩码解码器
-	{
-		// 为动态输入形状创建一个优化配置文件。
-		auto profile = builder->createOptimizationProfile();
-
-		// 为第一个输入设置最小、最优和最大维度。
-		profile->setDimensions(inputNames[1].c_str(), nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims3{ 1, 1, 2 });
-		profile->setDimensions(inputNames[1].c_str(), nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims3{ 1, 1, 2 });
-		profile->setDimensions(inputNames[1].c_str(), nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims3{ 1, 10, 2 });
-
-		// 为第二个输入设置最小、最优和最大维度。
-		profile->setDimensions(inputNames[2].c_str(), nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2{ 1, 1 });
-		profile->setDimensions(inputNames[2].c_str(), nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2{ 1, 1 });
-		profile->setDimensions(inputNames[2].c_str(), nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2{ 1, 10 });
-
-		// 将优化配置文件添加到构建器配置中。
-		config->addOptimizationProfile(profile);
-	}
-
-	// 如果指定，启用FP16模式。
-	if (isFP16)
-	{
-		config->setFlag(nvinfer1::BuilderFlag::kFP16);  // 使用混合精度以获得更快的推理速度
-	}
-
-	// 创建一个解析器，将ONNX模型转换为TensorRT网络。
-	nvonnxparser::IParser* parser = nvonnxparser::createParser(*network, gLogger);
-	assert(parser != nullptr);  // 确保解析器成功创建
-
-	// 从指定文件解析ONNX模型。
-	bool parsed = parser->parseFromFile(onnxPath.c_str(), static_cast<int>(gLogger.getReportableSeverity()));
-
-	// 确保用于性能分析的CUDA流有效。
-	assert(mCudaStream != nullptr);
-
-	// 将构建的网络序列化为二进制计划以便执行。
-	nvinfer1::IHostMemory* plan{ builder->buildSerializedNetwork(*network, *config) };
-	assert(plan != nullptr);  // 确保网络成功序列化
-
-	// 创建一个运行时对象，用于反序列化引擎。
-	mRuntime = nvinfer1::createInferRuntime(gLogger);
-	assert(mRuntime != nullptr);  // 确保运行时成功创建
-
-	// 反序列化序列化的计划以创建执行引擎（TensorRT 10 API）。
-	mEngine = mRuntime->deserializeCudaEngine(plan->data(), plan->size());
-	assert(mEngine != nullptr);  // 确保引擎成功反序列化
-
-	// 创建一个执行上下文以运行推理。
-	mContext = mEngine->createExecutionContext();
-	assert(mContext != nullptr);  // 确保上下文成功创建
-
-	// 清理资源。
-	delete network;
-	delete config;
-	delete parser;
-	delete plan;
-
-	// 使用输入和输出名称初始化引擎。
-	initialize(inputNames, outputNames);
+    mInputNames.clear();
+    mOutputNames.clear();
+    mInputIndices.clear();
+    mOutputIndices.clear();
+    mInputDims.clear();
+    mOutputDims.clear();
 }
 
-void EngineTRT::saveEngine(const std::string& engineFilePath) {
-	if (mEngine) {
-		// 将引擎序列化为二进制格式。
-		nvinfer1::IHostMemory* serializedEngine = mEngine->serialize();
-		std::ofstream engineFile(engineFilePath, std::ios::binary);
-		if (engineFile) {
-			// 将序列化的引擎数据写入指定文件。
-			engineFile.write(reinterpret_cast<const char*>(serializedEngine->data()), serializedEngine->size());
-			std::cout << "Serialized engine saved to " << engineFilePath << std::endl;
-		}
-		// 在TensorRT 10中，对象通过C++析构函数管理。
-		delete serializedEngine;  // 释放序列化的引擎内存
-	}
+void EngineTRT::releaseResources() noexcept {
+    if (mCudaStream) {
+        (void)cudaStreamSynchronize(mCudaStream);
+    }
+
+    releaseBuffers();
+
+    if (mCudaStream) {
+        (void)cudaStreamDestroy(mCudaStream);
+        mCudaStream = nullptr;
+    }
+
+    delete mContext;
+    delete mEngine;
+    delete mRuntime;
+    mContext = nullptr;
+    mEngine = nullptr;
+    mRuntime = nullptr;
 }
 
-void EngineTRT::deserializeEngine(std::string engine_name, std::vector<std::string> inputNames, std::vector<std::string> outputNames)
-{
-	// 以二进制模式打开引擎文件。
-	std::ifstream file(engine_name, std::ios::binary);
-	if (!file.good()) {
-		std::cerr << "read " << engine_name << " error!" << std::endl;
-		assert(false);  // 如果无法打开文件，触发断言失败
-	}
+void EngineTRT::build(
+    const std::string& onnx_path,
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names,
+    bool dynamic_shape,
+    bool fp16) {
+    if (!std::filesystem::is_regular_file(onnx_path)) {
+        throw std::runtime_error("ONNX file not found: " + onnx_path);
+    }
 
-	// 确定文件大小并读取序列化的引擎数据。
-	size_t size = 0;
-	file.seekg(0, file.end);
-	size = file.tellg();
-	file.seekg(0, file.beg);
-	char* serializedEngine = new char[size];
-	assert(serializedEngine);  // 确保内存分配成功
-	file.read(serializedEngine, size);
-	file.close();
+    nvinfer1::IBuilder* builder = nvinfer1::createInferBuilder(gLogger);
+    if (!builder) throw std::runtime_error("createInferBuilder failed");
 
-	// 创建一个运行时对象并反序列化引擎。
-	mRuntime = nvinfer1::createInferRuntime(gLogger);
-	assert(mRuntime);  // 确保运行时成功创建
-	mEngine = mRuntime->deserializeCudaEngine(serializedEngine, size);
-	mContext = mEngine->createExecutionContext();
-	delete[] serializedEngine;  // 释放序列化的引擎内存
+    const auto explicit_batch =
+        1U << static_cast<std::uint32_t>(
+            nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+    nvinfer1::INetworkDefinition* network = builder->createNetworkV2(explicit_batch);
+    nvinfer1::IBuilderConfig* config = builder->createBuilderConfig();
+    nvonnxparser::IParser* parser =
+        network ? nvonnxparser::createParser(*network, gLogger) : nullptr;
 
-	// 确保IO张量的数量与预期的输入和输出数量匹配。
-	assert(mEngine->getNbIOTensors() == inputNames.size() + outputNames.size());
+    if (!network || !config || !parser) {
+        delete parser;
+        delete config;
+        delete network;
+        delete builder;
+        throw std::runtime_error("failed to create TensorRT builder resources");
+    }
 
-	// 使用输入和输出名称初始化引擎。
-	initialize(inputNames, outputNames);
+    try {
+        if (dynamic_shape) {
+            if (input_names.size() < 3) {
+                throw std::invalid_argument(
+                    "dynamic SAM decoder requires at least three input names");
+            }
+
+            nvinfer1::IOptimizationProfile* profile =
+                builder->createOptimizationProfile();
+            if (!profile) {
+                throw std::runtime_error("createOptimizationProfile failed");
+            }
+
+            const bool coords_ok =
+                profile->setDimensions(
+                    input_names[1].c_str(),
+                    nvinfer1::OptProfileSelector::kMIN,
+                    nvinfer1::Dims3{1, 1, 2}) &&
+                profile->setDimensions(
+                    input_names[1].c_str(),
+                    nvinfer1::OptProfileSelector::kOPT,
+                    nvinfer1::Dims3{1, 2, 2}) &&
+                profile->setDimensions(
+                    input_names[1].c_str(),
+                    nvinfer1::OptProfileSelector::kMAX,
+                    nvinfer1::Dims3{1, 10, 2});
+            const bool labels_ok =
+                profile->setDimensions(
+                    input_names[2].c_str(),
+                    nvinfer1::OptProfileSelector::kMIN,
+                    nvinfer1::Dims2{1, 1}) &&
+                profile->setDimensions(
+                    input_names[2].c_str(),
+                    nvinfer1::OptProfileSelector::kOPT,
+                    nvinfer1::Dims2{1, 2}) &&
+                profile->setDimensions(
+                    input_names[2].c_str(),
+                    nvinfer1::OptProfileSelector::kMAX,
+                    nvinfer1::Dims2{1, 10});
+            if (!coords_ok || !labels_ok || config->addOptimizationProfile(profile) < 0) {
+                throw std::runtime_error(
+                    "failed to configure TensorRT dynamic-shape profile");
+            }
+        }
+
+        if (fp16) config->setFlag(nvinfer1::BuilderFlag::kFP16);
+
+        if (!parser->parseFromFile(
+                onnx_path.c_str(),
+                static_cast<int>(gLogger.getReportableSeverity()))) {
+            throw std::runtime_error("failed to parse ONNX model: " + onnx_path);
+        }
+
+        nvinfer1::IHostMemory* plan =
+            builder->buildSerializedNetwork(*network, *config);
+        if (!plan) throw std::runtime_error("buildSerializedNetwork failed");
+
+        mRuntime = nvinfer1::createInferRuntime(gLogger);
+        if (!mRuntime) {
+            delete plan;
+            throw std::runtime_error("createInferRuntime failed");
+        }
+
+        mEngine = mRuntime->deserializeCudaEngine(plan->data(), plan->size());
+        delete plan;
+        if (!mEngine) {
+            throw std::runtime_error("deserializeCudaEngine failed after ONNX build");
+        }
+
+        mContext = mEngine->createExecutionContext();
+        if (!mContext) {
+            throw std::runtime_error("createExecutionContext failed");
+        }
+    }
+    catch (...) {
+        delete parser;
+        delete config;
+        delete network;
+        delete builder;
+        throw;
+    }
+
+    delete parser;
+    delete config;
+    delete network;
+    delete builder;
+
+    initialize(input_names, output_names);
 }
 
-void EngineTRT::initialize(std::vector<std::string> inputNames, std::vector<std::string> outputNames)
-{
-	// 调整GPU和CPU缓冲区向量的大小以容纳所有引擎IO张量
-	const int numIOTensors = mEngine->getNbIOTensors();
-	mGpuBuffers.resize(numIOTensors);
-	mCpuBuffers.resize(numIOTensors);
+void EngineTRT::deserializeEngine(
+    const std::string& engine_name,
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names) {
+    std::ifstream file(engine_name, std::ios::binary | std::ios::ate);
+    if (!file) {
+        throw std::runtime_error("unable to open TensorRT engine: " + engine_name);
+    }
 
-	// 循环遍历所有IO张量以分配内存并存储维度信息
-	for (int i = 0; i < numIOTensors; ++i)
-	{
-		const char* tensorName = mEngine->getIOTensorName(i);
-		// 根据张量的维度（Dims64）计算所需的大小
-		nvinfer1::Dims64 shape64 = mEngine->getTensorShape(tensorName);
-		size_t tensor_size = getSizeByDim64(shape64);
-		mBufferBindingSizes.push_back(tensor_size);  // 存储张量的大小
-		mBufferBindingBytes.push_back(tensor_size * sizeof(float));  // 计算字节大小
+    const std::streamsize file_size = file.tellg();
+    if (file_size <= 0) {
+        throw std::runtime_error("TensorRT engine is empty: " + engine_name);
+    }
+    file.seekg(0, std::ios::beg);
 
-		// 为CPU缓冲区分配主机内存
-		mCpuBuffers[i] = new float[tensor_size];
+    std::vector<char> serialized_engine(static_cast<std::size_t>(file_size));
+    if (!file.read(serialized_engine.data(), file_size)) {
+        throw std::runtime_error("failed to read TensorRT engine: " + engine_name);
+    }
 
-		// 为GPU缓冲区分配设备内存
-		cudaMalloc(&mGpuBuffers[i], mBufferBindingBytes[i]);
+    mRuntime = nvinfer1::createInferRuntime(gLogger);
+    if (!mRuntime) throw std::runtime_error("createInferRuntime failed");
 
-		// 根据张量是输入还是输出，分别存储输入和输出维度
-		if (mEngine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kINPUT)
-		{
-			mInputDims.push_back(toDims32(shape64));
-		}
-		else
-		{
-			mOutputDims.push_back(toDims32(shape64));
-		}
-	}
+    mEngine = mRuntime->deserializeCudaEngine(
+        serialized_engine.data(),
+        serialized_engine.size());
+    if (!mEngine) {
+        throw std::runtime_error("deserializeCudaEngine failed: " + engine_name);
+    }
 
-	// 为异步操作创建一个CUDA流
-	CUDA_CHECK(cudaStreamCreate(&mCudaStream));
+    mContext = mEngine->createExecutionContext();
+    if (!mContext) throw std::runtime_error("createExecutionContext failed");
+
+    initialize(input_names, output_names);
 }
 
-bool EngineTRT::infer()
-{
-	// 将数据从主机（CPU）输入缓冲区异步复制到设备（GPU）输入缓冲区
-	copyInputToDeviceAsync(mCudaStream);
+int EngineTRT::tensorIndex(const std::string& tensor_name) const {
+    if (!mEngine || tensor_name.empty()) return -1;
 
-	// 使用TensorRT执行推理，传递GPU缓冲区
-	bool status = mContext->executeV2(mGpuBuffers.data());
-
-	if (!status)
-	{
-		// 如果推理失败，打印错误消息并返回false
-		std::cout << "inference error!" << std::endl;
-		return false;
-	}
-
-	// 将结果从设备（GPU）输出缓冲区异步复制到主机（CPU）输出缓冲区
-	copyOutputToHostAsync(mCudaStream);
-
-	// 如果推理成功，返回true
-	return true;
+    for (int index = 0; index < mEngine->getNbIOTensors(); ++index) {
+        const char* current_name = mEngine->getIOTensorName(index);
+        if (current_name && tensor_name == current_name) return index;
+    }
+    return -1;
 }
 
-void EngineTRT::copyInputToDeviceAsync(const cudaStream_t& stream)
-{
-	// 为输入缓冲区执行从CPU到GPU的异步内存复制
-	memcpyBuffers(true, false, true, stream);
+int EngineTRT::inputIndex(std::size_t logical_index) const {
+    if (logical_index >= mInputIndices.size()) {
+        throw std::out_of_range("TensorRT logical input index is out of range");
+    }
+    return mInputIndices[logical_index];
 }
 
-void EngineTRT::copyOutputToHostAsync(const cudaStream_t& stream)
-{
-	// 调用memcpyBuffers来处理从GPU到CPU内存的数据复制。
-	// 参数：false（不复制输入缓冲区），true（从设备复制数据到主机），
-	// true（异步执行复制），以及给定的CUDA流。
-	memcpyBuffers(false, true, true, stream);
+int EngineTRT::outputIndex(std::size_t logical_index) const {
+    if (logical_index >= mOutputIndices.size()) {
+        throw std::out_of_range("TensorRT logical output index is out of range");
+    }
+    return mOutputIndices[logical_index];
 }
 
-void EngineTRT::memcpyBuffers(const bool copyInput, const bool deviceToHost, const bool async, const cudaStream_t& stream)
-{
-	// 循环遍历TensorRT引擎中的所有IO张量（输入和输出）。
-	for (int i = 0; i < mEngine->getNbIOTensors(); i++)
-	{
-		const char* tensorName = mEngine->getIOTensorName(i);
-		const bool isInput = (mEngine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kINPUT);
-		// 根据复制方向确定目标指针和源指针。
-		void* dstPtr = deviceToHost ? mCpuBuffers[i] : mGpuBuffers[i];
-		const void* srcPtr = deviceToHost ? mGpuBuffers[i] : mCpuBuffers[i];
-		// 获取缓冲区的字节大小。
-		const size_t byteSize = mBufferBindingBytes[i];
-		// 根据方向设置内存复制操作的类型。
-		const cudaMemcpyKind memcpyType = deviceToHost ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+void EngineTRT::initialize(
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names) {
+    if (!mEngine || !mContext) {
+        throw std::runtime_error("TensorRT engine is not initialized");
+    }
 
-		// 检查当前张量是输入还是输出，并相应地进行复制。
-		if ((copyInput && isInput) || (!copyInput && !isInput))
-		{
-			if (async)
-			{
-				// 使用CUDA流执行异步内存复制。
-				CUDA_CHECK(cudaMemcpyAsync(dstPtr, srcPtr, byteSize, memcpyType, stream));
-			}
-			else
-			{
-				// 执行同步内存复制。
-				CUDA_CHECK(cudaMemcpy(dstPtr, srcPtr, byteSize, memcpyType));
-			}
-		}
-	}
+    const int tensor_count = mEngine->getNbIOTensors();
+    if (tensor_count != static_cast<int>(input_names.size() + output_names.size())) {
+        throw std::runtime_error(
+            "TensorRT engine IO count does not match configured tensor names");
+    }
+
+    if (mCudaStream) {
+        checkCuda(cudaStreamSynchronize(mCudaStream), "cudaStreamSynchronize before reinitialize");
+        checkCuda(cudaStreamDestroy(mCudaStream), "cudaStreamDestroy before reinitialize");
+        mCudaStream = nullptr;
+    }
+    releaseBuffers();
+
+    mGpuBuffers.assign(static_cast<std::size_t>(tensor_count), nullptr);
+    mCpuBuffers.assign(static_cast<std::size_t>(tensor_count), nullptr);
+    mBufferBindingBytes.assign(static_cast<std::size_t>(tensor_count), 0);
+    mBufferBindingSizes.assign(static_cast<std::size_t>(tensor_count), 0);
+
+    for (int index = 0; index < tensor_count; ++index) {
+        const char* tensor_name = mEngine->getIOTensorName(index);
+        if (!tensor_name) {
+            throw std::runtime_error("TensorRT returned a null tensor name");
+        }
+
+        const nvinfer1::Dims64 shape = mEngine->getTensorShape(tensor_name);
+        const std::size_t element_count = getSizeByDim64(shape);
+        const std::size_t byte_count = element_count * sizeof(float);
+        const std::size_t storage_index = static_cast<std::size_t>(index);
+
+        mBufferBindingSizes[storage_index] = element_count;
+        mBufferBindingBytes[storage_index] = byte_count;
+        mCpuBuffers[storage_index] = new float[element_count]{};
+        checkCuda(
+            cudaMalloc(&mGpuBuffers[storage_index], byte_count),
+            "cudaMalloc TensorRT buffer");
+    }
+
+    mInputNames = input_names;
+    mOutputNames = output_names;
+    mInputIndices.reserve(input_names.size());
+    mOutputIndices.reserve(output_names.size());
+    mInputDims.reserve(input_names.size());
+    mOutputDims.reserve(output_names.size());
+
+    auto register_tensor = [this](
+                               const std::string& name,
+                               nvinfer1::TensorIOMode expected_mode,
+                               std::vector<int>& indices,
+                               std::vector<nvinfer1::Dims>& dims) {
+        const int index = tensorIndex(name);
+        if (index < 0) {
+            throw std::runtime_error("TensorRT tensor not found: " + name);
+        }
+
+        const char* engine_name = mEngine->getIOTensorName(index);
+        if (!engine_name || mEngine->getTensorIOMode(engine_name) != expected_mode) {
+            throw std::runtime_error("TensorRT tensor has unexpected IO mode: " + name);
+        }
+        if (std::find(indices.begin(), indices.end(), index) != indices.end()) {
+            throw std::runtime_error("duplicate TensorRT tensor configured: " + name);
+        }
+
+        indices.push_back(index);
+        dims.push_back(toDims32(mEngine->getTensorShape(name.c_str())));
+    };
+
+    for (const auto& name : input_names) {
+        register_tensor(
+            name,
+            nvinfer1::TensorIOMode::kINPUT,
+            mInputIndices,
+            mInputDims);
+    }
+    for (const auto& name : output_names) {
+        register_tensor(
+            name,
+            nvinfer1::TensorIOMode::kOUTPUT,
+            mOutputIndices,
+            mOutputDims);
+    }
+
+    checkCuda(cudaStreamCreate(&mCudaStream), "cudaStreamCreate");
 }
 
-size_t EngineTRT::getSizeByDim(const nvinfer1::Dims& dims)
-{
-	size_t size = 1;
+void EngineTRT::saveEngine(const std::string& engine_file_path) const {
+    if (!mEngine) {
+        throw std::runtime_error("cannot serialize an uninitialized TensorRT engine");
+    }
 
-	// 循环遍历每个维度并相乘以计算总大小。
-	for (size_t i = 0; i < dims.nbDims; ++i)
-	{
-		// 如果维度为-1（动态），则使用预定义的最大大小。
-		if (dims.d[i] == -1)
-			size *= MAX_NUM_PROMPTS;
-		else
-			size *= dims.d[i];
-	}
+    nvinfer1::IHostMemory* serialized = mEngine->serialize();
+    if (!serialized) {
+        throw std::runtime_error("TensorRT engine serialization failed");
+    }
 
-	return size;
+    std::ofstream file(engine_file_path, std::ios::binary);
+    if (!file) {
+        delete serialized;
+        throw std::runtime_error("unable to create engine file: " + engine_file_path);
+    }
+
+    file.write(
+        reinterpret_cast<const char*>(serialized->data()),
+        static_cast<std::streamsize>(serialized->size()));
+    const bool write_ok = static_cast<bool>(file);
+    delete serialized;
+
+    if (!write_ok) {
+        throw std::runtime_error("failed to write engine file: " + engine_file_path);
+    }
 }
 
-void EngineTRT::setInput(cv::Mat& image)
-{
-	// 从模型的输入形状中提取输入维度（高度和宽度）
-	const int inputH = mInputDims[0].d[2];
-	const int inputW = mInputDims[0].d[3];
+bool EngineTRT::infer() {
+    if (!mContext || !mEngine || !mCudaStream) return false;
 
-	int i = 0;  // 缓冲区放置的索引计数器
+    try {
+        copyInputToDeviceAsync(mCudaStream);
+        // executeV2 is synchronous and does not consume mCudaStream. Explicitly
+        // complete H2D/profile work before calling it.
+        checkCuda(
+            cudaStreamSynchronize(mCudaStream),
+            "TensorRT input stream synchronize");
 
-	// 遍历输入图像中的每个像素
-	for (int row = 0; row < image.rows; ++row)
-	{
-		// 指向图像数据中行起始位置的指针
-		uchar* uc_pixel = image.data + row * image.step;
+        if (!mContext->executeV2(mGpuBuffers.data())) return false;
 
-		for (int col = 0; col < image.cols; ++col)
-		{
-			// 对RGB通道的像素值进行归一化
-			// 将BGR图像转换为归一化的RGB并存储在mCpuBuffers中
-			mCpuBuffers[0][i] = ((float)uc_pixel[2] / 255.0f - 0.485f) / 0.229f; // 红色通道
-			mCpuBuffers[0][i + image.rows * image.cols] = ((float)uc_pixel[1] / 255.0f - 0.456f) / 0.224f; // 绿色通道
-			mCpuBuffers[0][i + 2 * image.rows * image.cols] = ((float)uc_pixel[0] / 255.0f - 0.406f) / 0.225f; // 蓝色通道
-
-			uc_pixel += 3;  // 移动到下一个像素
-			++i;  // 递增索引
-		}
-	}
+        copyOutputToHostAsync(mCudaStream);
+        // getOutput reads host buffers immediately after infer() returns.
+        checkCuda(
+            cudaStreamSynchronize(mCudaStream),
+            "TensorRT output stream synchronize");
+        return true;
+    }
+    catch (const std::exception& e) {
+        LOG_ERROR(gLogger) << "TensorRT infer failed: " << e.what() << std::endl;
+        return false;
+    }
 }
 
-void EngineTRT::setInput(float* features, float* imagePointCoords, float* imagePointLabels, float* maskInput, float* hasMaskInput, int numPoints)
-{
-	// 清理旧缓冲区并为输入数据分配新缓冲区
-	delete[] mCpuBuffers[1];
-	delete[] mCpuBuffers[2];
-	mCpuBuffers[1] = new float[numPoints * 2];  // 点坐标缓冲区
-	mCpuBuffers[2] = new float[numPoints];      // 点标签缓冲区
-
-	// 在GPU上为输入数据分配内存
-	cudaMalloc(&mGpuBuffers[1], sizeof(float) * numPoints * 2); // 坐标
-	cudaMalloc(&mGpuBuffers[2], sizeof(float) * numPoints);     // 标签
-
-	// 为TensorRT设置数据绑定的字节大小
-	mBufferBindingBytes[1] = sizeof(float) * numPoints * 2;
-	mBufferBindingBytes[2] = sizeof(float) * numPoints;
-
-	// 将输入数据复制到CPU缓冲区
-	memcpy(mCpuBuffers[0], features, mBufferBindingBytes[0]);
-	memcpy(mCpuBuffers[1], imagePointCoords, sizeof(float) * numPoints * 2);
-	memcpy(mCpuBuffers[2], imagePointLabels, sizeof(float) * numPoints);
-	memcpy(mCpuBuffers[3], maskInput, mBufferBindingBytes[3]);
-	memcpy(mCpuBuffers[4], hasMaskInput, mBufferBindingBytes[4]);
-
-	// 配置TensorRT使用动态输入形状（TensorRT 10 IO张量API）
-	mContext->setOptimizationProfileAsync(0, mCudaStream); // 设置优化配置文件
-	const char* coordsTensorName = mEngine->getIOTensorName(1);
-	const char* labelsTensorName = mEngine->getIOTensorName(2);
-	mContext->setInputShape(coordsTensorName, nvinfer1::Dims3{ 1, numPoints, 2 }); // 为坐标设置输入维度
-	mContext->setInputShape(labelsTensorName, nvinfer1::Dims2{ 1, numPoints });    // 为标签设置输入维度
+void EngineTRT::copyInputToDeviceAsync(cudaStream_t stream) {
+    memcpyBuffers(true, false, true, stream);
 }
 
-void EngineTRT::getOutput(float* features)
-{
-	// 查找输出张量索引并复制其数据
-	int outIndex = -1;
-	const int numIOTensors = mEngine->getNbIOTensors();
-	for (int i = 0; i < numIOTensors; ++i)
-	{
-		const char* tensorName = mEngine->getIOTensorName(i);
-		if (mEngine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kOUTPUT)
-		{
-			outIndex = i;
-			break;
-		}
-	}
-
-	if (outIndex < 0)
-	{
-		std::cerr << "No output tensor found for features." << std::endl;
-		return;
-	}
-
-	memcpy(features, mCpuBuffers[outIndex], mBufferBindingBytes[outIndex]);
+void EngineTRT::copyOutputToHostAsync(cudaStream_t stream) {
+    memcpyBuffers(false, true, true, stream);
 }
 
-void EngineTRT::getOutput(float* iouPrediction, float* lowResolutionMasks)
-{
-	// 识别两个输出张量并按大小映射：小的->IoU，大的->低分辨率掩码
-	int outIdxA = -1, outIdxB = -1;
-	const int numIOTensors = mEngine->getNbIOTensors();
-	for (int i = 0; i < numIOTensors; ++i)
-	{
-		const char* tensorName = mEngine->getIOTensorName(i);
-		if (mEngine->getTensorIOMode(tensorName) == nvinfer1::TensorIOMode::kOUTPUT)
-		{
-			if (outIdxA == -1) outIdxA = i;
-			else { outIdxB = i; break; }
-		}
-	}
+void EngineTRT::memcpyBuffers(
+    bool copy_input,
+    bool device_to_host,
+    bool async,
+    cudaStream_t stream) {
+    if (!mEngine) {
+        throw std::runtime_error("TensorRT engine is not initialized");
+    }
 
-	if (outIdxA < 0 || outIdxB < 0)
-	{
-		std::cerr << "Expected two output tensors (IoU and low-res masks)." << std::endl;
-		return;
-	}
+    for (int index = 0; index < mEngine->getNbIOTensors(); ++index) {
+        const char* tensor_name = mEngine->getIOTensorName(index);
+        if (!tensor_name) {
+            throw std::runtime_error("TensorRT returned a null tensor name");
+        }
 
-	const size_t bytesA = mBufferBindingBytes[outIdxA];
-	const size_t bytesB = mBufferBindingBytes[outIdxB];
+        const bool is_input =
+            mEngine->getTensorIOMode(tensor_name) == nvinfer1::TensorIOMode::kINPUT;
+        if ((copy_input && !is_input) || (!copy_input && is_input)) continue;
 
-	int iouIdx, masksIdx;
-	if (bytesA <= bytesB)
-	{
-		iouIdx = outIdxA;
-		masksIdx = outIdxB;
-	}
-	else
-	{
-		iouIdx = outIdxB;
-		masksIdx = outIdxA;
-	}
+        const std::size_t storage_index = static_cast<std::size_t>(index);
+        void* destination = device_to_host
+            ? static_cast<void*>(mCpuBuffers[storage_index])
+            : mGpuBuffers[storage_index];
+        const void* source = device_to_host
+            ? mGpuBuffers[storage_index]
+            : static_cast<const void*>(mCpuBuffers[storage_index]);
+        const std::size_t bytes = mBufferBindingBytes[storage_index];
+        const cudaMemcpyKind kind = device_to_host
+            ? cudaMemcpyDeviceToHost
+            : cudaMemcpyHostToDevice;
 
-	memcpy(iouPrediction, mCpuBuffers[iouIdx], mBufferBindingBytes[iouIdx]);
-	memcpy(lowResolutionMasks, mCpuBuffers[masksIdx], mBufferBindingBytes[masksIdx]);
+        if (async) {
+            checkCuda(
+                cudaMemcpyAsync(destination, source, bytes, kind, stream),
+                "cudaMemcpyAsync");
+        }
+        else {
+            checkCuda(cudaMemcpy(destination, source, bytes, kind), "cudaMemcpy");
+        }
+    }
+}
+
+void EngineTRT::setInput(const cv::Mat& image) {
+    if (mInputDims.empty() || mInputIndices.empty()) {
+        throw std::runtime_error("TensorRT input buffers are not initialized");
+    }
+    if (image.empty() || image.type() != CV_8UC3) {
+        throw std::invalid_argument(
+            "TensorRT image input must be non-empty CV_8UC3");
+    }
+
+    const int engine_index = inputIndex(0);
+    const std::size_t storage_index = static_cast<std::size_t>(engine_index);
+    const nvinfer1::Dims& input_dims = mInputDims.front();
+    if (input_dims.nbDims < 4) {
+        throw std::runtime_error("unexpected image input dimensions");
+    }
+
+    const int input_height = input_dims.d[2];
+    const int input_width = input_dims.d[3];
+    if (image.rows != input_height || image.cols != input_width) {
+        throw std::invalid_argument(
+            "image size does not match TensorRT input dimensions");
+    }
+
+    const std::size_t plane_size =
+        static_cast<std::size_t>(input_height) *
+        static_cast<std::size_t>(input_width);
+    if (mBufferBindingSizes.at(storage_index) < plane_size * 3) {
+        throw std::runtime_error("TensorRT image input buffer is too small");
+    }
+
+    float* target = mCpuBuffers.at(storage_index);
+    for (int row = 0; row < image.rows; ++row) {
+        const cv::Vec3b* pixels = image.ptr<cv::Vec3b>(row);
+        for (int column = 0; column < image.cols; ++column) {
+            const std::size_t index =
+                static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(image.cols) +
+                static_cast<std::size_t>(column);
+            target[index] = (pixels[column][2] / 255.0f - 0.485f) / 0.229f;
+            target[index + plane_size] =
+                (pixels[column][1] / 255.0f - 0.456f) / 0.224f;
+            target[index + 2 * plane_size] =
+                (pixels[column][0] / 255.0f - 0.406f) / 0.225f;
+        }
+    }
+}
+
+void EngineTRT::setInput(
+    const float* features,
+    const float* image_point_coords,
+    const float* image_point_labels,
+    const float* mask_input,
+    const float* has_mask_input,
+    int num_points) {
+    if (!features || !image_point_coords || !image_point_labels ||
+        !mask_input || !has_mask_input) {
+        throw std::invalid_argument("SAM decoder input contains a null pointer");
+    }
+    if (num_points <= 0 || num_points > 10) {
+        throw std::invalid_argument("SAM decoder num_points must be in [1, 10]");
+    }
+    if (!mContext || !mEngine || mInputIndices.size() < 5) {
+        throw std::runtime_error("SAM decoder buffers are not initialized");
+    }
+
+    const int features_index = inputIndex(0);
+    const int coords_index = inputIndex(1);
+    const int labels_index = inputIndex(2);
+    const int mask_index = inputIndex(3);
+    const int has_mask_index = inputIndex(4);
+
+    const std::size_t coords_bytes =
+        sizeof(float) * static_cast<std::size_t>(num_points) * 2;
+    const std::size_t labels_bytes =
+        sizeof(float) * static_cast<std::size_t>(num_points);
+
+    std::unique_ptr<float[]> new_coords_host(
+        new float[static_cast<std::size_t>(num_points) * 2]{});
+    std::unique_ptr<float[]> new_labels_host(
+        new float[static_cast<std::size_t>(num_points)]{});
+    void* new_coords_device = nullptr;
+    void* new_labels_device = nullptr;
+
+    try {
+        checkCuda(
+            cudaMalloc(&new_coords_device, coords_bytes),
+            "cudaMalloc point_coords");
+        checkCuda(
+            cudaMalloc(&new_labels_device, labels_bytes),
+            "cudaMalloc point_labels");
+    }
+    catch (...) {
+        if (new_coords_device) (void)cudaFree(new_coords_device);
+        if (new_labels_device) (void)cudaFree(new_labels_device);
+        throw;
+    }
+
+    const auto replace_dynamic_buffer = [this](
+                                            int engine_index,
+                                            std::unique_ptr<float[]> host,
+                                            void* device,
+                                            std::size_t bytes,
+                                            std::size_t elements) {
+        const std::size_t index = static_cast<std::size_t>(engine_index);
+        if (mGpuBuffers[index]) {
+            checkCuda(cudaFree(mGpuBuffers[index]), "cudaFree dynamic TensorRT buffer");
+        }
+        delete[] mCpuBuffers[index];
+        mGpuBuffers[index] = device;
+        mCpuBuffers[index] = host.release();
+        mBufferBindingBytes[index] = bytes;
+        mBufferBindingSizes[index] = elements;
+    };
+
+    try {
+        replace_dynamic_buffer(
+            coords_index,
+            std::move(new_coords_host),
+            new_coords_device,
+            coords_bytes,
+            static_cast<std::size_t>(num_points) * 2);
+        new_coords_device = nullptr;
+
+        replace_dynamic_buffer(
+            labels_index,
+            std::move(new_labels_host),
+            new_labels_device,
+            labels_bytes,
+            static_cast<std::size_t>(num_points));
+        new_labels_device = nullptr;
+    }
+    catch (...) {
+        if (new_coords_device) (void)cudaFree(new_coords_device);
+        if (new_labels_device) (void)cudaFree(new_labels_device);
+        throw;
+    }
+
+    const auto copy_to_host = [this](
+                                  int engine_index,
+                                  const void* source,
+                                  std::size_t bytes) {
+        const std::size_t index = static_cast<std::size_t>(engine_index);
+        if (bytes > mBufferBindingBytes.at(index)) {
+            throw std::runtime_error("SAM decoder input exceeds TensorRT host buffer");
+        }
+        std::memcpy(mCpuBuffers.at(index), source, bytes);
+    };
+
+    copy_to_host(
+        features_index,
+        features,
+        mBufferBindingBytes.at(static_cast<std::size_t>(features_index)));
+    copy_to_host(coords_index, image_point_coords, coords_bytes);
+    copy_to_host(labels_index, image_point_labels, labels_bytes);
+    copy_to_host(
+        mask_index,
+        mask_input,
+        mBufferBindingBytes.at(static_cast<std::size_t>(mask_index)));
+    copy_to_host(
+        has_mask_index,
+        has_mask_input,
+        mBufferBindingBytes.at(static_cast<std::size_t>(has_mask_index)));
+
+    if (!mContext->setOptimizationProfileAsync(0, mCudaStream)) {
+        throw std::runtime_error("setOptimizationProfileAsync failed");
+    }
+    if (!mContext->setInputShape(
+            mInputNames.at(1).c_str(),
+            nvinfer1::Dims3{1, num_points, 2}) ||
+        !mContext->setInputShape(
+            mInputNames.at(2).c_str(),
+            nvinfer1::Dims2{1, num_points})) {
+        throw std::runtime_error("setInputShape failed");
+    }
+}
+
+void EngineTRT::getOutput(float* features) const {
+    if (!features || !mEngine || mOutputIndices.empty()) {
+        throw std::invalid_argument("invalid TensorRT output target");
+    }
+
+    const int engine_index = outputIndex(0);
+    const std::size_t index = static_cast<std::size_t>(engine_index);
+    std::memcpy(
+        features,
+        mCpuBuffers.at(index),
+        mBufferBindingBytes.at(index));
+}
+
+void EngineTRT::getOutput(
+    float* iou_prediction,
+    float* low_resolution_masks) const {
+    if (!iou_prediction || !low_resolution_masks || !mEngine) {
+        throw std::invalid_argument("invalid SAM decoder output target");
+    }
+    if (mOutputIndices.size() != 2) {
+        throw std::runtime_error(
+            "SAM decoder must expose exactly two configured output tensors");
+    }
+
+    // SpeedSam configures outputs as {"iou_predictions", "low_res_masks"}.
+    // Preserve that explicit business meaning instead of inferring tensor roles
+    // from enumeration order or buffer size.
+    const int iou_engine_index = outputIndex(0);
+    const int masks_engine_index = outputIndex(1);
+    const std::size_t iou_index = static_cast<std::size_t>(iou_engine_index);
+    const std::size_t masks_index = static_cast<std::size_t>(masks_engine_index);
+
+    std::memcpy(
+        iou_prediction,
+        mCpuBuffers.at(iou_index),
+        mBufferBindingBytes.at(iou_index));
+    std::memcpy(
+        low_resolution_masks,
+        mCpuBuffers.at(masks_index),
+        mBufferBindingBytes.at(masks_index));
 }

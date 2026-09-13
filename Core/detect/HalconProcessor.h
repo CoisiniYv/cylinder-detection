@@ -1,113 +1,106 @@
-﻿#pragma once
-#include <opencv2/core/cuda.hpp>
+#pragma once
+
 #include <HalconCpp.h>
+#include <opencv2/core/cuda.hpp>
 
-#include <string>
-#include <vector>
-#include <memory>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
 #include <atomic>
-#include <future>
+#include <condition_variable>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
-class HalconProcessor
-{
+class HalconProcessor {
 public:
-	// 保存类型枚举
-	enum class SaveType {
-		PATH_SAVE
-	};
+    enum class SaveType {
+        PATH_SAVE
+    };
 
-	// 回调函数类型定义
-	using SaveCompleteCallback = std::function<void(const std::string& filePath,
-		bool success,
-		SaveType type,
-		const std::string& message)>;
+    using SaveCompleteCallback = std::function<void(
+        const std::string& file_path,
+        bool success,
+        SaveType type,
+        const std::string& message)>;
 
-	// 异步操作状态结构体
-	struct AsyncStatus {
-		int pendingOperations;
-		int completedOperations;
-		int failedOperations;
-	};
+    struct AsyncStatus {
+        int pendingOperations = 0;
+        int completedOperations = 0;
+        int failedOperations = 0;
+    };
 
-	// 构造函数和析构函数
-	HalconProcessor();
-	~HalconProcessor();
+    HalconProcessor();
+    ~HalconProcessor();
 
-	// 删除拷贝构造函数和赋值操作符
-	HalconProcessor(const HalconProcessor&) = delete;
-	HalconProcessor& operator=(const HalconProcessor&) = delete;
+    HalconProcessor(const HalconProcessor&) = delete;
+    HalconProcessor& operator=(const HalconProcessor&) = delete;
 
-	// 主要图像处理函数
-	bool processImage(const cv::cuda::GpuMat& inputImage,
-		std::string& outputImagePath,
-		std::vector<std::pair<double, double>>& centerPoints,
-		bool enableSaveToPath = false,
-		const std::string& savePath = "",
-		std::uint64_t group_id = 0,
-		std::int8_t index_in_group = -1);
+    bool processImage(
+        const cv::cuda::GpuMat& input_image,
+        std::string& output_image_path,
+        std::vector<std::pair<double, double>>& center_points,
+        bool enable_save_to_path = false,
+        const std::string& save_path = {},
+        std::uint64_t group_id = 0,
+        int index_in_group = -1);
 
-	// 异步操作管理
-	void waitForAsyncOperations();
-	AsyncStatus getAsyncStatus() const;
+    void waitForAsyncOperations();
+    AsyncStatus getAsyncStatus() const;
 
-	// 回调函数管理
-	void setSaveCompleteCallback(SaveCompleteCallback callback);
-	void clearSaveCompleteCallback();
+    void setSaveCompleteCallback(SaveCompleteCallback callback);
+    void clearSaveCompleteCallback();
 
-	// 工具函数
-	static bool gpuMatToHalconHObject(const cv::cuda::GpuMat& gpuMat,
-		HalconCpp::HObject& ho_Image);
+    static bool gpuMatToHalconHObject(
+        const cv::cuda::GpuMat& gpu_mat,
+        HalconCpp::HObject& image);
 
 private:
-	// 异步任务结构体
-	struct AsyncSaveTask {
-		enum class TaskType {
-			PATH_SAVE
-		};
+    struct AsyncSaveTask {
+        HalconCpp::HObject image;
+        HalconCpp::HObject overlay_region;
+        std::string target_path;
+        std::promise<bool> promise;
+    };
 
-		TaskType type;
-		HalconCpp::HObject image;
-		HalconCpp::HObject scratchesAndDots;
-		std::string targetPath;
-		std::promise<bool> promise;
-	};
+    void asyncWorkerFunction();
+    void invokeSaveCallback(
+        const std::string& file_path,
+        bool success,
+        SaveType type,
+        const std::string& message);
 
-	// 成员变量
-	std::atomic<int> pendingAsyncOperations;
-	std::atomic<int> completedAsyncOperations;
-	std::atomic<int> failedAsyncOperations;
+    std::future<bool> saveOverlayImageAsync(
+        const HalconCpp::HObject& image,
+        const HalconCpp::HObject& overlay_region,
+        const std::string& output_path);
 
-	std::thread asyncWorkerThread;
-	std::atomic<bool> stopAsyncThread;
+    bool performSaveOperation(
+        const HalconCpp::HObject& image,
+        const HalconCpp::HObject& overlay_region,
+        const std::string& output_path);
 
-	std::queue<std::shared_ptr<AsyncSaveTask>> asyncSaveQueue;
-	std::mutex queueMutex;
-	std::condition_variable queueCondition;
+    std::string generateSavePathFilename(
+        const std::string& save_path,
+        std::uint64_t group_id,
+        int index_in_group) const;
 
-	SaveCompleteCallback saveCompleteCallback;
-	std::mutex callbackMutex;
+private:
+    std::atomic<int> mPendingAsyncOperations{0};
+    std::atomic<int> mCompletedAsyncOperations{0};
+    std::atomic<int> mFailedAsyncOperations{0};
+    std::atomic<bool> mStopAsyncThread{false};
 
-	// 私有方法
-	void asyncWorkerFunction();
-	void invokeSaveCallback(const std::string& filePath,
-		bool success,
-		SaveType type,
-		const std::string& message);
+    std::thread mAsyncWorkerThread;
+    std::queue<std::shared_ptr<AsyncSaveTask>> mAsyncSaveQueue;
+    mutable std::mutex mQueueMutex;
+    std::condition_variable mQueueCondition;
 
-	std::future<bool> saveOverlayImageAsync(const HalconCpp::HObject& ho_Image,
-		const HalconCpp::HObject& ho_ScratchesAndDots,
-		const std::string& outputPath);
-
-	bool performSaveOperation(const HalconCpp::HObject& image,
-		const HalconCpp::HObject& scratchesAndDots,
-		const std::string& outputPath);
-
-	std::string generateSavePathFilename(const std::string& savePath,
-		std::uint64_t group_id,
-		std::int8_t index_in_group) const;
+    SaveCompleteCallback mSaveCompleteCallback;
+    mutable std::mutex mCallbackMutex;
 };

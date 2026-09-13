@@ -1,50 +1,48 @@
-﻿#pragma once
+#pragma once
+
+#include "detect_params.hpp"
+
+#include <atomic>
 #include <memory>
 #include <vector>
-#include <atomic>
-#include "sqlite_helper.hpp"
-#include "Server.hpp"
-#include "queue_manager.hpp"
-#include "camera_thread.hpp"
-#include "detect_thread.hpp"
-#include "group_manager.hpp"
-
-
 
 namespace XL {
 
-	// 调度器：负责整体多线程编排
-	// - 当 Server 接收任务参数后，调用 Scheduler::start(params)
-	// - 创建并启动：队列管理器、相机采集线程、4 个检测线程、组管理线程
-	// - 在 stop() 时，优雅地停止所有线程并清理资源
-	class Scheduler {
-	public:
-		Scheduler();
-		~Scheduler();
+class CameraThread;
+class DetectThread;
+class GroupManager;
 
-		// 启动整体流程；默认创建 4 个检测线程（对应四面）
-		bool start(const DetectParams& params, int num_detect_threads = 4);
-		// 从全局 server 状态启动（若有任务），便于与 Server 集成
-		bool startFromServerState(int num_detect_threads = 4);
+// Owns the multi-face pipeline lifecycle.
+//
+// Scheduler coordinates workers and their shutdown order; it does not parse
+// HTTP requests and it does not implement image-processing algorithms.
+class Scheduler {
+public:
+    Scheduler();
+    ~Scheduler();
 
-		void stop();
-		void join();
-		bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
+    Scheduler(const Scheduler&) = delete;
+    Scheduler& operator=(const Scheduler&) = delete;
 
-		// 可选：设置组超时（毫秒），转发给 GroupManager
-		void setGroupTimeoutMs(int ms) { mGroupTimeoutMs = ms; }
+    bool start(const DetectParams& params, int num_detect_threads);
+    bool startFromRuntimeState();
 
-	private:
-		void cleanup();
+    void stop();
+    void join();
+    bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
 
-	private:
-		std::atomic<bool> mRunning{ false };
-		DetectParams mParams{};
-		std::shared_ptr<CameraThread> mCamera;
-		std::vector<std::unique_ptr<DetectThread>> mWorkers;
-		std::unique_ptr<GroupManager> mGroupMgr;
+    void setGroupTimeoutMs(int timeout_ms) { mGroupTimeoutMs = timeout_ms; }
 
-		int mGroupTimeoutMs = 55000; // 默认 5 秒
-	};
+private:
+    void cleanup();
+
+private:
+    std::atomic<bool> mRunning{false};
+    DetectParams mParams{};
+    std::shared_ptr<CameraThread> mCamera;
+    std::vector<std::unique_ptr<DetectThread>> mWorkers;
+    std::unique_ptr<GroupManager> mGroupMgr;
+    int mGroupTimeoutMs = 55000; // 55 seconds
+};
 
 } // namespace XL

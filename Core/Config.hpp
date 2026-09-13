@@ -1,35 +1,34 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
-#include <vector>
 
 namespace XL {
-	class Config
-	{
-	public:
-		Config(const char* file);
-		~Config();
-	public:
 
-		bool mState = false;
-		void show();
-	public:
-		const char* file = NULL;
+class Config {
+public:
+    explicit Config(const char* file);
+    ~Config() = default;
 
-		std::string ip{};//IP地址10.37.57.112
+    void show() const;
 
-		int analyzerPort;//服务器端口 
+public:
+    bool mState = false;
+    std::string sourceFile;
 
-		std::string outputdir{};
+    std::string ip{"127.0.0.1"};
+    int analyzerPort = 9003;
 
-		std::string modelDir{};
+    std::string outputdir{"output"};
+    std::string modelDir{"models"};
+    std::string dbPath{"my_inspection.db"};
 
-		std::string dbPath{}; // 数据库文件路径（例如 E:\ydk\resource\my_inspection.db）
+    std::string slidePort{};
+    int slideAxisId = 0;
+    int slideTimeoutMs = 20000;
 
-		// 滑台串口配置（UART1）
-		std::string slidePort{}; // 例如 "COM11" 或 "\\\\.\\COM11"
-		int slideAxisId = 0;     // 轴ID（推荐 0=X,1=Y,2=Z）
-		int slideTimeoutMs = 20000; // 等待下位机回报超时
+    int gpuDevice = 0;
+    int detectThreads = 4;
+    int groupTimeoutMs = 55000;
+};
 
-	};
-}
+} // namespace XL

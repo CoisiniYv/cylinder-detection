@@ -1,426 +1,428 @@
-﻿
+#include "camera_thread.hpp"
+
+#include "Utils/Log.hpp"
+#include "queue_manager.hpp"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include <array>
+#include <chrono>
 #include <clocale>
-#include "camera_thread.hpp"
+#include <stdexcept>
 
 namespace XL {
+namespace {
 
+constexpr int kSlideLoad = 20;
+constexpr int kSlideGotoCamera = 21;
+constexpr int kSlideUnload = 22;
+constexpr int kSlideCameraNext = 23;
+constexpr int kCameraSnapTimeoutMs = 10000;
 
-	CameraThread::CameraThread() {}
+} // namespace
 
-	CameraThread::~CameraThread() {
-		stop();
-		join();
-		cleanupDevice();
-	}
+CameraThread::CameraThread() = default;
 
-	bool CameraThread::start(int delay_ms,
-		const std::string& device_id,
-		const std::string& slide_port,
-		int slide_axis_id,
-		int slide_timeout_ms,
-		bool enable_group_capture) {
-		if (isRunning()) return true;
-		mDelayMs = delay_ms;
-		mDeviceId = device_id;
-		mSlideCfg = SerialConfig{};
-		mSlideCfg.port = slide_port;
-		mSlideAxisId = slide_axis_id;
-		mSlideTimeoutMs = slide_timeout_ms > 0 ? slide_timeout_ms : 20000;
-		mEnableGroupCapture = enable_group_capture;
-		if (!initDevice()) {
-			LOGE("init Fall");
-			return false;
-		}
-		if (!mSlideCfg.port.empty()) {
-			if (!openSlideSerial()) {
-				LOGE("滑台串口 %s 打开失败", mSlideCfg.port.c_str());
-			}
-			else {
-				LOGI("滑台串口 %s 已连接", mSlideCfg.port.c_str());
-			}
-		}
-		g_queue_manager.start();
+CameraThread::~CameraThread() {
+    stop();
+    join();
+}
 
-		mStopRequested.store(false, std::memory_order_relaxed);
-		mRunning.store(true, std::memory_order_relaxed);
-		{
-			std::lock_guard<std::mutex> lk(mAllowMtx);
-			// 启动时默认允许首组
-			mAllowNextGroupFlag = true;
-		}
-		mThread = std::thread([this]() { this->captureLoop(); });
-		LOGI("CameraThread已启动，delay_ms=%d", mDelayMs);
-		return true;
-	}
+bool CameraThread::start(
+    int delay_ms,
+    const std::string& device_id,
+    const std::string& slide_port,
+    int slide_axis_id,
+    int slide_timeout_ms,
+    bool enable_group_capture) {
+    if (isRunning()) return true;
 
-	void CameraThread::stop() {
-		mStopRequested.store(true, std::memory_order_relaxed);
-		mAllowCv.notify_all();
-		mSingleCaptureCv.notify_all();
-	}
+    mDelayMs = std::max(0, delay_ms);
+    mDeviceId = device_id;
+    mSlideConfig = SerialConfig{};
+    mSlideConfig.port = slide_port;
+    mSlideAxisId = slide_axis_id;
+    mSlideTimeoutMs = slide_timeout_ms > 0 ? slide_timeout_ms : 20000;
+    mEnableGroupCapture = enable_group_capture;
 
-	void CameraThread::join() {
-		if (mThread.joinable()) {
-			mThread.join();
-		}
-		mRunning.store(false, std::memory_order_relaxed);
-		g_queue_manager.stop();
-		closeSlideSerial();
-		cleanupDevice();
-	}
+    if (!initDevice()) {
+        LOGE("camera initialization failed");
+        return false;
+    }
 
-	void CameraThread::allow_next_group() {
-		{
-			std::lock_guard<std::mutex> lk(mAllowMtx);
-			mAllowNextGroupFlag = true;
-		}
-		mAllowCv.notify_one();
-		LOGI("Allow next snap");
-	}
+    if (!mSlideConfig.port.empty()) {
+        if (!openSlideSerial()) {
+            LOGE("failed to open slide serial port: %s", mSlideConfig.port.c_str());
+        }
+        else {
+            LOGI("slide serial connected: %s", mSlideConfig.port.c_str());
+        }
+    }
 
-	// ---------------- 滑台串口实现 ----------------
+    mStopRequested.store(false, std::memory_order_relaxed);
+    mRunning.store(true, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(mAllowMutex);
+        mAllowNextGroup = true;
+    }
+    mThread = std::thread(&CameraThread::captureLoop, this);
+    LOGI("CameraThread started: delay_ms=%d group_capture=%d", mDelayMs, mEnableGroupCapture ? 1 : 0);
+    return true;
+}
 
-	bool CameraThread::openSlideSerial() {
-		if (mSlideCfg.port.empty()) return false;
-		return mSlide.Open(mSlideCfg);
-	}
+void CameraThread::stop() {
+    mStopRequested.store(true, std::memory_order_relaxed);
 
-	void CameraThread::closeSlideSerial() {
-		mSlide.Close();
-	}
+    {
+        std::lock_guard<std::mutex> lock(mSingleCaptureMutex);
+        if (mSingleCaptureRequested) {
+            try {
+                throw std::runtime_error("camera stopped before single capture completed");
+            }
+            catch (...) {
+                mSingleCapturePromise.set_exception(std::current_exception());
+            }
+            mSingleCaptureRequested = false;
+        }
+    }
 
-	bool CameraThread::lineHasToken(const std::string& line, const std::string& token) {
-		if (token.empty()) return false;
-		return line.find(token) != std::string::npos;
-	}
+    mAllowCondition.notify_all();
+    mSingleCaptureCondition.notify_all();
+}
 
-	void CameraThread::drainSlideLines() {
-		if (!mSlide.IsOpen()) return;
-		(void)mSlide.DrainLines();
-	}
+void CameraThread::join() {
+    if (mThread.joinable()) mThread.join();
+    mRunning.store(false, std::memory_order_relaxed);
+    closeSlideSerial();
+    cleanupDevice();
+}
 
-	bool CameraThread::sendSlideCommand(int dir, int steps, int dly) {
-		if (!mSlide.IsOpen()) return false;
-		std::string line = std::to_string(mSlideAxisId) + "," +
-			std::to_string(dir) + "," +
-			std::to_string(steps) + "," +
-			std::to_string(dly);
-		return mSlide.WriteLine(line);
-	}
+void CameraThread::allow_next_group() {
+    {
+        std::lock_guard<std::mutex> lock(mAllowMutex);
+        mAllowNextGroup = true;
+    }
+    mAllowCondition.notify_one();
+}
 
-	bool CameraThread::waitSlideResponseAny(const std::vector<std::string>& tokens, int timeout_ms) {
-		if (!mSlide.IsOpen()) return false;
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-		while (!mStopRequested.load(std::memory_order_relaxed)) {
-			for (auto& line : mSlide.DrainLines()) {
-				if (lineHasToken(line, "Parse Err") || lineHasToken(line, "Bad Cmd") || lineHasToken(line, "Flow Busy")) {
-					LOGE("滑台返回错误: %s", line.c_str());
-					return false;
-				}
-				for (const auto& t : tokens) {
-					if (lineHasToken(line, t)) {
-						return true;
-					}
-				}
-			}
-			if (std::chrono::steady_clock::now() >= deadline) {
-				return false;
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
-		return false;
-	}
+bool CameraThread::openSlideSerial() {
+    if (mSlideConfig.port.empty()) return false;
+    return mSlide.Open(mSlideConfig);
+}
 
-	bool CameraThread::waitSlideResponse(const std::string& token, int timeout_ms) {
-		return waitSlideResponseAny({ token }, timeout_ms);
-	}
+void CameraThread::closeSlideSerial() {
+    mSlide.Close();
+}
 
-	// 单张采集接口实现
-	std::future<ImageFrame> CameraThread::captureSingleImage(int timeout_ms) {
-		std::lock_guard<std::mutex> lk(mSingleCaptureMtx);
+bool CameraThread::lineHasToken(const std::string& line, const std::string& token) {
+    return !token.empty() && line.find(token) != std::string::npos;
+}
 
-		// 检查是否已有进行中的单张采集
-		if (mSingleCaptureRequested) {
-			std::promise<ImageFrame> failed_promise;
-			failed_promise.set_exception(std::make_exception_ptr(
-				std::runtime_error("Single capture already in progress")));
-			return failed_promise.get_future();
-		}
+void CameraThread::drainSlideLines() {
+    if (mSlide.IsOpen()) (void)mSlide.DrainLines();
+}
 
-		mSingleCaptureRequested = true;
-		mSingleCapturePromise = std::promise<ImageFrame>();
+bool CameraThread::sendSlideCommand(int direction, int steps, int delay) {
+    if (!mSlide.IsOpen()) return false;
+    return mSlide.WriteLine(
+        std::to_string(mSlideAxisId) + "," +
+        std::to_string(direction) + "," +
+        std::to_string(steps) + "," +
+        std::to_string(delay));
+}
 
-		// 通知采集线程执行单张采集
-		mSingleCaptureCv.notify_one();
+bool CameraThread::waitSlideResponseAny(
+    const std::vector<std::string>& tokens,
+    int timeout_ms) {
+    if (!mSlide.IsOpen() || timeout_ms <= 0) return false;
 
-		return mSingleCapturePromise.get_future();
-	}
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!mStopRequested.load(std::memory_order_relaxed)) {
+        for (const auto& line : mSlide.DrainLines()) {
+            if (lineHasToken(line, "Parse Err") ||
+                lineHasToken(line, "Bad Cmd") ||
+                lineHasToken(line, "Flow Busy")) {
+                LOGE("slide controller error: %s", line.c_str());
+                return false;
+            }
+            for (const auto& token : tokens) {
+                if (lineHasToken(line, token)) return true;
+            }
+        }
 
-	ImageFrame CameraThread::captureSingleImageInternal(int timeout_ms) {
-		if (!mDevice) {
-			throw std::runtime_error("Camera device not initialized");
-		}
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
 
-		mphdc::DataFormatType format;
-		mphdc::DataFrameUndefinedStruct data;
-		bool ok = mDevice->Snap(true, &format, &data, timeout_ms);
-		if (!ok) {
-			throw std::runtime_error("Snap failed within timeout");
-		}
+bool CameraThread::waitSlideResponse(const std::string& token, int timeout_ms) {
+    return waitSlideResponseAny({token}, timeout_ms);
+}
 
-		// 解码 6 通道为两张 BGR 图（012 -> ps，345 -> rgb）
-		mphdc::DataFrame2DStruct* data2D = reinterpret_cast<mphdc::DataFrame2DStruct*>(&data);
-		const int height = data2D->Height();
-		const int width = data2D->Width();
-		std::array<unsigned char*, 6> chPtr{};
-		for (int c = 0; c < data2D->Channel() && c < 6; ++c) {
-			unsigned char* ptr = nullptr;
-			int size = data2D->GetRawChannelData(c, &ptr);
-			if (ptr && size == height * width) chPtr[c] = ptr;
-		}
+std::future<ImageFrame> CameraThread::captureSingleImage(int timeout_ms) {
+    std::lock_guard<std::mutex> lock(mSingleCaptureMutex);
+    if (!isRunning() || mStopRequested.load(std::memory_order_relaxed)) {
+        std::promise<ImageFrame> failed;
+        auto future = failed.get_future();
+        failed.set_exception(std::make_exception_ptr(
+            std::runtime_error("camera worker is not running")));
+        return future;
+    }
+    if (mSingleCaptureRequested) {
+        std::promise<ImageFrame> failed;
+        auto future = failed.get_future();
+        failed.set_exception(std::make_exception_ptr(
+            std::runtime_error("single capture is already in progress")));
+        return future;
+    }
 
-		if (!(chPtr[2] && chPtr[1] && chPtr[0] && chPtr[5] && chPtr[4] && chPtr[3])) {
-			throw std::runtime_error("Incomplete channel data");
-		}
+    mSingleCaptureRequested = true;
+    mSingleCaptureTimeoutMs = timeout_ms > 0 ? timeout_ms : kCameraSnapTimeoutMs;
+    mSingleCapturePromise = std::promise<ImageFrame>();
+    auto future = mSingleCapturePromise.get_future();
+    mSingleCaptureCondition.notify_one();
+    return future;
+}
 
-		cv::Mat ps = mergeBGR(chPtr[2], chPtr[1], chPtr[0], height, width);
-		cv::Mat rgb = mergeBGR(chPtr[5], chPtr[4], chPtr[3], height, width);
-		if (ps.empty() || rgb.empty()) {
-			throw std::runtime_error("OpenCV merge failed");
-		}
+ImageFrame CameraThread::captureSingleImageInternal(int timeout_ms) {
+    if (!mDevice) throw std::runtime_error("camera device is not initialized");
 
-		ImageFrame frame;
-		frame.ps_image = std::move(ps);
-		frame.rgb_image = std::move(rgb);
-		frame.meta.device_id = mDeviceId;
-		frame.meta.group_id = 0; // 单张采集组ID设为0
-		frame.meta.index_in_group = -1; // 索引设为-1
+    mphdc::DataFormatType format;
+    mphdc::DataFrameUndefinedStruct data;
+    if (!mDevice->Snap(true, &format, &data, timeout_ms)) {
+        throw std::runtime_error("camera Snap timed out or failed");
+    }
 
-		return frame;
-	}
+    auto* data_2d = reinterpret_cast<mphdc::DataFrame2DStruct*>(&data);
+    const int height = data_2d->Height();
+    const int width = data_2d->Width();
+    std::array<unsigned char*, 6> channels{};
+    for (int index = 0; index < data_2d->Channel() && index < static_cast<int>(channels.size()); ++index) {
+        unsigned char* pointer = nullptr;
+        const int size = data_2d->GetRawChannelData(index, &pointer);
+        if (pointer && size == height * width) channels[static_cast<std::size_t>(index)] = pointer;
+    }
 
-	bool CameraThread::initDevice() {
-		setlocale(LC_ALL, "");
+    for (const auto* channel : channels) {
+        if (!channel) throw std::runtime_error("camera returned incomplete channel data");
+    }
 
-		// 创建设备实例
-		mDevice = mphdc::MPHdc_Factory::GetInstance(mphdc::LogMediaType::CallBack);
-		if (!mDevice) {
-			LOGE("GetInstance返回空");
-			return false;
-		}
+    ImageFrame frame;
+    frame.ps_image = mergeBGR(channels[2], channels[1], channels[0], height, width);
+    frame.rgb_image = mergeBGR(channels[5], channels[4], channels[3], height, width);
+    if (frame.ps_image.empty() || frame.rgb_image.empty()) {
+        throw std::runtime_error("failed to compose camera BGR images");
+    }
+    frame.meta.device_id = mDeviceId;
+    return frame;
+}
 
-		// 更新设备列表并打开第一个设备
-		mDevice->UpdateDeviceList();
-		int TotalDeviceCnt = mDevice->GetDeviceCount();
-		if (TotalDeviceCnt <= 0) {
-			LOGE("未发现可用设备");
-			return false;
-		}
+bool CameraThread::initDevice() {
+    std::setlocale(LC_ALL, "");
+    mDevice = mphdc::MPHdc_Factory::GetInstance(mphdc::LogMediaType::CallBack);
+    if (!mDevice) {
+        LOGE("MPHdc factory returned null");
+        return false;
+    }
 
-		bool rtv = mDevice->Open(mDevice->GetDeviceInfo(0));
-		if (!rtv) {
-			LOGE("打开设备失败");
-			mphdc::MPHdc_Factory::DestructInstance(mDevice);
-			mDevice = nullptr;
-			return false;
-		}
+    mDevice->UpdateDeviceList();
+    const int device_count = mDevice->GetDeviceCount();
+    if (device_count <= 0) {
+        LOGE("no camera device found");
+        mphdc::MPHdc_Factory::DestructInstance(mDevice);
+        mDevice = nullptr;
+        return false;
+    }
 
-		LOGI("设备打开成功，设备数=%d", TotalDeviceCnt);
+    // Current vendor integration always opens the first enumerated device.
+    // Mapping a logical device_id to a physical SDK device requires hardware
+    // metadata and is intentionally left as a documented follow-up.
+    if (!mDevice->Open(mDevice->GetDeviceInfo(0))) {
+        LOGE("failed to open camera device 0");
+        mphdc::MPHdc_Factory::DestructInstance(mDevice);
+        mDevice = nullptr;
+        return false;
+    }
 
-		// 读取并设置基本参数：SoftTriggerOnly，关闭 Hold
-		mDevice->GetBasicSettings(&mBasicSettings);
-		LOGI("当前相机工作模式：%s", mphdc::EnumUtils::GetEnumName(mBasicSettings.WorkingMode.Mode));
+    mDevice->GetBasicSettings(&mBasicSettings);
+    mBasicSettings.HoldState = 0;
+    mBasicSettings.TriggerSource = mphdc::TriggerSourceType::SoftTriggerOnly;
+    mDevice->SetBasicSettings(mBasicSettings);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-		mBasicSettings.HoldState = 0; // 关闭 hold 状态
-		mBasicSettings.TriggerSource = mphdc::TriggerSourceType::SoftTriggerOnly; // 软件触发
-		mDevice->SetBasicSettings(mBasicSettings);
+    LOGI("camera device opened; enumerated_count=%d", device_count);
+    return true;
+}
 
-		// 设置写入后等待一小段时间
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+void CameraThread::cleanupDevice() {
+    if (!mDevice) return;
+    mBasicSettings.HoldState = 1;
+    mDevice->SetBasicSettings(mBasicSettings);
+    mDevice->Close();
+    mphdc::MPHdc_Factory::DestructInstance(mDevice);
+    mDevice = nullptr;
+}
 
-		return true;
-	}
+cv::Mat CameraThread::mergeBGR(
+    unsigned char* blue,
+    unsigned char* green,
+    unsigned char* red,
+    int height,
+    int width) {
+    if (!blue || !green || !red || height <= 0 || width <= 0) return {};
 
-	void CameraThread::cleanupDevice() {
-		if (!mDevice) return;
-		// 打开 hold 状态
-		mBasicSettings.HoldState = 1;
-		mDevice->SetBasicSettings(mBasicSettings);
+    cv::Mat image(height, width, CV_8UC3);
+    for (int row_index = 0; row_index < height; ++row_index) {
+        cv::Vec3b* row = image.ptr<cv::Vec3b>(row_index);
+        for (int column = 0; column < width; ++column) {
+            const int index = row_index * width + column;
+            row[column][0] = blue[index];
+            row[column][1] = green[index];
+            row[column][2] = red[index];
+        }
+    }
+    return image;
+}
 
-		// 关闭并释放实例（注意不能直接 delete）
-		mDevice->Close();
-		mphdc::MPHdc_Factory::DestructInstance(mDevice);
-		mDevice = nullptr;
-	}
+void CameraThread::captureLoop() {
+    LOGI("CameraThread capture loop started");
 
-	cv::Mat CameraThread::mergeBGR(unsigned char* ch0,
-		unsigned char* ch1,
-		unsigned char* ch2,
-		int h, int w)
-	{
-		cv::Mat rgb(h, w, CV_8UC3);
-		for (int y = 0; y < h; ++y) {
-			cv::Vec3b* row = rgb.ptr<cv::Vec3b>(y);
-			for (int x = 0; x < w; ++x) {
-				row[x][0] = ch0[y * w + x];   // B
-				row[x][1] = ch1[y * w + x];   // G
-				row[x][2] = ch2[y * w + x];   // R
-			}
-		}
-		return rgb;
-	}
-	void CameraThread::captureLoop() {
-		LOGI("CameraThread采集循环开始");
+    while (!mStopRequested.load(std::memory_order_relaxed)) {
+        {
+            std::unique_lock<std::mutex> lock(mSingleCaptureMutex);
+            if (mSingleCaptureCondition.wait_for(
+                    lock,
+                    std::chrono::milliseconds(100),
+                    [this] {
+                        return mSingleCaptureRequested ||
+                               mStopRequested.load(std::memory_order_relaxed);
+                    })) {
+                if (mStopRequested.load(std::memory_order_relaxed)) break;
+                if (mSingleCaptureRequested) {
+                    try {
+                        ImageFrame frame = captureSingleImageInternal(mSingleCaptureTimeoutMs);
+                        mSingleCapturePromise.set_value(std::move(frame));
+                    }
+                    catch (...) {
+                        mSingleCapturePromise.set_exception(std::current_exception());
+                    }
+                    mSingleCaptureRequested = false;
+                    continue;
+                }
+            }
+        }
 
-		while (!mStopRequested.load(std::memory_order_relaxed)) {
-			// 单张采集检查逻辑
-			{
-				std::unique_lock<std::mutex> lk(mSingleCaptureMtx);
-				if (mSingleCaptureCv.wait_for(lk, std::chrono::milliseconds(100),
-					[this]() { return mSingleCaptureRequested || mStopRequested; })) {
+        if (!mEnableGroupCapture) continue;
 
-					if (mStopRequested.load(std::memory_order_relaxed)) break;
+        {
+            std::unique_lock<std::mutex> lock(mAllowMutex);
+            mAllowCondition.wait(lock, [this] {
+                return mAllowNextGroup || mStopRequested.load(std::memory_order_relaxed);
+            });
+            if (mStopRequested.load(std::memory_order_relaxed)) break;
+            mAllowNextGroup = false;
+        }
 
-					if (mSingleCaptureRequested) {
-						try {
-							ImageFrame frame = captureSingleImageInternal(10000);
-							mSingleCapturePromise.set_value(std::move(frame));
-							LOGI("单张采集完成");
-						}
-						catch (const std::exception& e) {
-							mSingleCapturePromise.set_exception(std::current_exception());
-							LOGE("单张采集失败: %s", e.what());
-						}
-						mSingleCaptureRequested = false;
-						continue;
-					}
-				}
-			}
+        const bool slide_enabled = mSlide.IsOpen();
+        if (slide_enabled) {
+            drainSlideLines();
+            if (!sendSlideCommand(kSlideLoad) ||
+                !waitSlideResponse("FLOW LOAD DONE", mSlideTimeoutMs)) {
+                LOGE("slide LOAD flow failed");
+                allow_next_group();
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+            }
+            if (!sendSlideCommand(kSlideGotoCamera) ||
+                !waitSlideResponse("FLOW GOTO_CAM DONE", mSlideTimeoutMs)) {
+                LOGE("slide GOTO_CAM flow failed");
+                allow_next_group();
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+            }
+        }
 
-			if (!mEnableGroupCapture) {
-				continue;
-			}
+        const std::uint64_t group_id = mGroupSequence++;
+        LOGI("capture group started: group=%llu", static_cast<unsigned long long>(group_id));
 
-			// 等待允许开启新的一组
-			{
-				std::unique_lock<std::mutex> lk(mAllowMtx);
-				mAllowCv.wait(lk, [this]() {
-					return mAllowNextGroupFlag || mStopRequested.load(std::memory_order_relaxed);
-					});
-				if (mStopRequested.load(std::memory_order_relaxed)) break;
-				// 消耗许可，防止下一次循环直接开始下一组
-				mAllowNextGroupFlag = false;
-			}
+        for (int face_index = 0; face_index < static_cast<int>(kQuadImageCount);) {
+            if (mStopRequested.load(std::memory_order_relaxed)) break;
 
-			const bool slideEnabled = mSlide.IsOpen();
-			if (slideEnabled) {
-				drainSlideLines();
-				// 1) LOAD
-				if (!sendSlideCommand(20, 0, 0) || !waitSlideResponse("FLOW LOAD DONE", mSlideTimeoutMs)) {
-					LOGE("滑台 LOAD 流程失败");
-					allow_next_group();
-					std::this_thread::sleep_for(std::chrono::milliseconds(200));
-					continue;
-				}
-				// 2) GOTO_CAM
-				if (!sendSlideCommand(21, 0, 0) || !waitSlideResponse("FLOW GOTO_CAM DONE", mSlideTimeoutMs)) {
-					LOGE("滑台 GOTO_CAM 流程失败");
-					allow_next_group();
-					std::this_thread::sleep_for(std::chrono::milliseconds(200));
-					continue;
-				}
-			}
+            mphdc::DataFormatType format;
+            mphdc::DataFrameUndefinedStruct data;
+            if (!mDevice || !mDevice->Snap(true, &format, &data, kCameraSnapTimeoutMs)) {
+                // Preserve historical retry semantics until hardware-side retry
+                // policy can be validated on the production device.
+                LOGE("camera Snap failed; retrying current face");
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
 
-			const std::uint64_t group_id = mGroupSeq++;
-			LOGI("开始采集新组group=%llu", group_id);
+            auto* data_2d = reinterpret_cast<mphdc::DataFrame2DStruct*>(&data);
+            const int height = data_2d->Height();
+            const int width = data_2d->Width();
+            std::array<unsigned char*, 6> channels{};
+            for (int channel_index = 0;
+                 channel_index < data_2d->Channel() && channel_index < static_cast<int>(channels.size());
+                 ++channel_index) {
+                unsigned char* pointer = nullptr;
+                const int size = data_2d->GetRawChannelData(channel_index, &pointer);
+                if (pointer && size == height * width) {
+                    channels[static_cast<std::size_t>(channel_index)] = pointer;
+                }
+            }
 
-			for (int idx = 0; idx < static_cast<int>(kQuadImageCount); /* idx++ 在成功后 */) {
-				if (mStopRequested.load(std::memory_order_relaxed)) break;
+            bool channels_complete = true;
+            for (const auto* channel : channels) channels_complete = channels_complete && channel != nullptr;
+            if (!channels_complete) {
+                LOGE("camera channel data incomplete; retrying current face");
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
 
-				mphdc::DataFormatType format;
-				mphdc::DataFrameUndefinedStruct data;
-				bool ok = mDevice && mDevice->Snap(true, &format, &data, 10000);
-				if (!ok) {
-					LOGE("Snap 失败，重试中");
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-					continue; // 本张重试
-				}
+            ImageFrame frame;
+            frame.ps_image = mergeBGR(channels[2], channels[1], channels[0], height, width);
+            frame.rgb_image = mergeBGR(channels[5], channels[4], channels[3], height, width);
+            if (frame.ps_image.empty() || frame.rgb_image.empty()) {
+                LOGE("failed to compose camera image; retrying current face");
+                continue;
+            }
+            frame.meta.device_id = mDeviceId;
+            frame.meta.group_id = group_id;
+            frame.meta.index_in_group = face_index;
 
-				// 解码 6 通道为两张 BGR 图（012 -> ps，345 -> rgb）
-				mphdc::DataFrame2DStruct* data2D = reinterpret_cast<mphdc::DataFrame2DStruct*>(&data);
-				const int height = data2D->Height();
-				const int width = data2D->Width();
-				std::array<unsigned char*, 6> chPtr{};
-				for (int c = 0; c < data2D->Channel() && c < 6; ++c) {
-					unsigned char* ptr = nullptr;
-					int size = data2D->GetRawChannelData(c, &ptr);
-					if (ptr && size == height * width) chPtr[c] = ptr;
-				}
+            if (!g_queue_manager.pushRaw(std::move(frame))) {
+                LOGE("raw frame queue is stopped");
+                break;
+            }
 
-				if (!(chPtr[2] && chPtr[1] && chPtr[0] && chPtr[5] && chPtr[4] && chPtr[3])) {
-					LOGE("通道数据不完整，重试当前张");
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-					continue;
-				}
+            if (slide_enabled) {
+                if (face_index < static_cast<int>(kQuadImageCount) - 1) {
+                    if (!sendSlideCommand(kSlideCameraNext) ||
+                        !waitSlideResponseAny({"Cam Next", "POS_DONE"}, mSlideTimeoutMs)) {
+                        LOGE("slide CAM_NEXT failed: group=%llu face=%d",
+                             static_cast<unsigned long long>(group_id), face_index);
+                        break;
+                    }
+                }
+                else if (!sendSlideCommand(kSlideUnload) ||
+                         !waitSlideResponse("FLOW UNLOAD DONE", mSlideTimeoutMs)) {
+                    LOGE("slide UNLOAD failed: group=%llu",
+                         static_cast<unsigned long long>(group_id));
+                }
+            }
 
-				cv::Mat ps = mergeBGR(chPtr[2], chPtr[1], chPtr[0], height, width);
-				cv::Mat rgb = mergeBGR(chPtr[5], chPtr[4], chPtr[3], height, width);
-				if (ps.empty() || rgb.empty()) {
-					LOGE("OpenCV 合成失败，重试当前张");
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-					continue;
-				}
+            ++face_index;
+            if (mDelayMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(mDelayMs));
+            }
+        }
+    }
 
-				ImageFrame frame;
-				frame.ps_image = std::move(ps);
-				frame.rgb_image = std::move(rgb);
-				frame.meta.device_id = mDeviceId;
-				frame.meta.group_id = group_id;
-				frame.meta.index_in_group = idx;
-
-				//if (!g_queue_manager.pushRaw(std::move(frame))) {
-				//	LOGE("pushRaw 失败（队列可能已停止）");
-				//	break;
-				//}
-
-				//LOGI("已入队：group=%llu, idx=%d", group_id, idx);
-
-				//++idx; // 成功后才递增到下一张
-				if (g_queue_manager.pushRaw(std::move(frame))) {
-					LOGI("已入队: group=%llu, idx=%d", group_id, idx);
-
-					// 四面采集：拍一张 -> CAM_NEXT -> 拍下一张
-					if (slideEnabled) {
-						if (idx < static_cast<int>(kQuadImageCount) - 1) {
-							if (!sendSlideCommand(23, 0, 0) ||
-								!waitSlideResponseAny({ "Cam Next", "POS_DONE" }, mSlideTimeoutMs)) {
-								LOGE("滑台 CAM_NEXT 失败，group=%llu, idx=%d", group_id, idx);
-								break;
-							}
-						}
-						else {
-							// 最后一面完成后 UNLOAD
-							if (!sendSlideCommand(22, 0, 0) ||
-								!waitSlideResponse("FLOW UNLOAD DONE", mSlideTimeoutMs)) {
-								LOGE("滑台 UNLOAD 失败，group=%llu", group_id);
-							}
-						}
-					}
-					++idx;
-				}
-				if (mDelayMs > 0) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(mDelayMs));
-				}
-			}
-
-			LOGI("组%llu采集完成，等待允许下一组", group_id);
-			// 下一轮 while 会再次等待 allow_next_group()
-		}
-
-		LOGI("CameraThread采集循环结束");
-	}
+    LOGI("CameraThread capture loop stopped");
+}
 
 } // namespace XL

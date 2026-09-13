@@ -1,15 +1,8 @@
-﻿#pragma once
+#pragma once
 
-
-#include <opencv2/core.hpp>
-#include <opencv2/core/cuda.hpp>
-#include "Server.hpp"
+#include "detect_params.hpp"
+#include "detection_context.hpp"
 #include "image_types.hpp"
-#include "Detect/Slice.h"
-#include "Detect/trtyolo_slice.hpp"
-#include "Detect/crop_image.h"
-#include "Detect/sam.h"
-#include "Detect/HalconProcessor.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -21,53 +14,58 @@
 
 namespace XL {
 
-	// 单张图片检测专用线程
-	class SingleDetectThread {
-	public:
-		SingleDetectThread();
-		~SingleDetectThread();
+class DetectionPipeline;
 
-		void start();
-		void stop();
-		void join();
-		bool isRunning() const { return mRunning.load(); }
+// Serialized worker for the single-image HTTP API.
+//
+// This class owns task queuing and synchronization only. Model caching, CUDA
+// placement and image-processing steps belong to DetectionPipeline.
+class SingleDetectThread {
+public:
+    explicit SingleDetectThread(DetectionContext context);
+    ~SingleDetectThread();
 
-		// 提交一个单图检测任务，并阻塞等待结果返回
-		// 返回是否成功；成功时 out_result 填充，失败时 err_msg 填充
-		bool submitAndWait(const DetectParams& params, SingleImageResult& out_result, std::string& err_msg);
+    SingleDetectThread(const SingleDetectThread&) = delete;
+    SingleDetectThread& operator=(const SingleDetectThread&) = delete;
 
-	private:
-		struct Task {
-			DetectParams params;
-			SingleImageResult result;
-			bool ok = false;
-			bool done = false;
-			std::string err;
-			std::mutex mtx;
-			std::condition_variable cv;
-		};
+    void start();
+    void stop();
+    void join();
+    bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
 
-		void worker();
+    bool submitAndWait(
+        const DetectParams& params,
+        SingleImageResult& out_result,
+        std::string& error_message);
 
-	private:
-		std::thread mThread;
-		std::atomic<bool> mRunning{ false };
-		std::mutex mQueueMutex;
-		std::condition_variable mQueueCv;
-		std::deque<std::shared_ptr<Task>> mTasks;
+private:
+    struct Task {
+        DetectParams params;
+        SingleImageResult result;
+        bool ok = false;
+        bool done = false;
+        std::string error;
+        std::mutex mutex;
+        std::condition_variable condition;
+    };
 
-		// 线程内资源（模型等）
-		std::unique_ptr<trtyolo::SliceDetector> mSliceDetector;
-		bool mModelReady = false;
-		std::string mLastTrtEngineFile;
-		bool mLastSwapRB = false;
+    void worker();
+    void failPendingTasks(const std::string& message);
+    static void completeTask(
+        const std::shared_ptr<Task>& task,
+        bool ok,
+        SingleImageResult result,
+        std::string error);
 
-		std::unique_ptr<SamSegmenter> mSam;
-		bool mSamReady = false;
-		std::string mLastEncoderPath;
-		std::string mLastDecoderPath;
+private:
+    DetectionContext mContext;
+    std::unique_ptr<DetectionPipeline> mPipeline;
 
-		HalconProcessor mHalcon;
-	};
+    std::thread mThread;
+    std::atomic<bool> mRunning{false};
+    std::mutex mQueueMutex;
+    std::condition_variable mQueueCondition;
+    std::deque<std::shared_ptr<Task>> mTasks;
+};
 
 } // namespace XL

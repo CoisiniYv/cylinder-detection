@@ -1,56 +1,66 @@
-﻿#pragma once
+#pragma once
 
+#include "detect_params.hpp"
+#include "detection_context.hpp"
 
-#include "image_types.hpp"
-#include "Detect/crop_image.h"
-#include "Detect/trtyolo_slice.hpp"
-#include "Detect/HalconProcessor.h"
-#include "Detect/Slice.h"
-#include "Detect/sam.h"
-
-#include <thread>
 #include <atomic>
-#include <string>
+#include <condition_variable>
 #include <memory>
-#include <vector>
-#include <filesystem>
-#include "Server.hpp"
+#include <mutex>
+#include <string>
+#include <thread>
+
 namespace XL {
 
-	// 检测线程
-	class DetectThread {
-	public:
-		// thread_index：用于日志/输出命名；params：检测参数（由 Server 下发）
-		explicit DetectThread(int thread_index, const DetectParams& params);
-		~DetectThread();
+class DetectionPipeline;
 
-		void start();        // 启动线程（内部会预加载模型）
-		void stop();         // 请求停止（优雅退出），不会影响全局队列
-		void join();         // 等待线程退出
-		bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
+// One worker in the multi-face pipeline.
+//
+// Responsibilities are intentionally narrow: own one worker thread, consume
+// ImageFrame objects from QueueManager, delegate image processing to
+// DetectionPipeline, and publish SingleImageResult objects.
+class DetectThread {
+public:
+    DetectThread(
+        int thread_index,
+        const DetectParams& params,
+        DetectionContext context);
+    ~DetectThread();
 
-		int index() const noexcept { return mIndex; }
+    DetectThread(const DetectThread&) = delete;
+    DetectThread& operator=(const DetectThread&) = delete;
 
-	private:
-		void run();          // 线程主体：阻塞式从队列取图并处理
+    void start();
+    bool waitUntilReady(std::string& error_message);
+    void stop();
+    void join();
+    bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
+    int index() const noexcept { return mIndex; }
 
-	private:
-		int mIndex = 0;
-		std::thread mThread;
-		std::atomic<bool> mRunning{ false };
+private:
+    enum class StartupState {
+        Idle,
+        Starting,
+        Ready,
+        Failed
+    };
 
-		// 配置与模型
-		DetectParams mParams;                                   // 可配置参数集合
-		std::unique_ptr<trtyolo::SliceDetector> mSliceDetector; // 每个线程独立模型实例
-		HalconProcessor mHalcon;                                // Halcon 处理器（线程内复用）
-		bool mModelReady = false;
+    void run();
+    void markStartupReady();
+    void markStartupFailed(std::string message);
 
-		// SAM 分割
-		std::unique_ptr<SamSegmenter> mSam;                     // SAM 分割器
-		bool mSamReady = false;
+private:
+    int mIndex = 0;
+    std::thread mThread;
+    std::atomic<bool> mRunning{false};
+    DetectParams mParams;
+    DetectionContext mContext;
+    std::unique_ptr<DetectionPipeline> mPipeline;
 
-		// 选择输入图像类型
-		bool mPreferPsImage = true;
-	};
+    std::mutex mStartupMutex;
+    std::condition_variable mStartupCondition;
+    StartupState mStartupState = StartupState::Idle;
+    std::string mStartupError;
+};
 
 } // namespace XL

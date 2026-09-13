@@ -1,129 +1,192 @@
 #include "crop_image.h"
+
 #include "StripeRemoval.h"
 
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudaimgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include <filesystem>
 #include <stdexcept>
+#include <vector>
+
+cv::cuda::GpuMat preprocessImage(
+    const cv::cuda::GpuMat& image_input,
+    const PreprocessOptions& options,
+    cv::cuda::Stream& stream) {
+    if (image_input.empty()) throw std::invalid_argument("preprocess input image is empty");
+
+    cv::cuda::GpuMat processed;
+    if (options.crop.enabled) {
+        const auto& crop = options.crop;
+        if (crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0 ||
+            crop.x + crop.width > image_input.cols ||
+            crop.y + crop.height > image_input.rows) {
+            throw std::out_of_range("ROI crop is outside the input image");
+        }
+        cv::cuda::GpuMat roi(
+            image_input,
+            cv::Rect(crop.x, crop.y, crop.width, crop.height));
+        roi.copyTo(processed, stream);
+    }
+    else {
+        image_input.copyTo(processed, stream);
+    }
+
+    if (options.stripe.enabled) {
+        const auto& stripe = options.stripe;
+        StripeRemoval stripe_removal;
+        processed = stripe_removal.remove_image_stripes(
+            processed,
+            {},
+            stripe.filter_width,
+            stripe.attenuation_factor,
+            stripe.target_angle,
+            stripe.angle_tolerance,
+            stripe.denoise,
+            stripe.denoise_h,
+            stripe.denoise_h_color,
+            stripe.denoise_search_window,
+            stripe.denoise_template_window,
+            stream);
+    }
+
+    if (options.qw_mask.enabled) {
+        const auto& mask_options = options.qw_mask;
+        if (mask_options.x1 < 0 || mask_options.y1 < 0 ||
+            mask_options.x2 < 0 || mask_options.y2 < 0 ||
+            mask_options.radius <= 0) {
+            throw std::invalid_argument("QW mask requires valid circle centers and radius");
+        }
+
+        const int crop_x = options.crop.enabled ? options.crop.x : 0;
+        const int crop_y = options.crop.enabled ? options.crop.y : 0;
+        const int left_center_x = mask_options.x1 - crop_x;
+        const int left_center_y = mask_options.y1 - crop_y;
+        const int right_center_x = mask_options.x2 - crop_x;
+        const int right_center_y = mask_options.y2 - crop_y;
+
+        cv::Mat mask(processed.size(), CV_8UC1, cv::Scalar(255));
+        cv::circle(
+            mask,
+            cv::Point(left_center_x, left_center_y),
+            mask_options.radius,
+            cv::Scalar(0),
+            -1);
+        cv::circle(
+            mask,
+            cv::Point(right_center_x, right_center_y),
+            mask_options.radius,
+            cv::Scalar(0),
+            -1);
+
+        cv::cuda::GpuMat mask_gpu;
+        mask_gpu.upload(mask, stream);
+        cv::cuda::GpuMat mask_float;
+        mask_gpu.convertTo(mask_float, CV_32F, 1.0 / 255.0, 0.0, stream);
+
+        const int channels = processed.channels();
+        cv::cuda::GpuMat processed_float;
+        processed.convertTo(
+            processed_float,
+            CV_MAKETYPE(CV_32F, channels),
+            1.0,
+            0.0,
+            stream);
+
+        if (channels == 1) {
+            cv::cuda::multiply(processed_float, mask_float, processed_float, 1.0, -1, stream);
+        }
+        else {
+            std::vector<cv::cuda::GpuMat> mask_channels(
+                static_cast<std::size_t>(channels),
+                mask_float);
+            cv::cuda::GpuMat expanded_mask;
+            cv::cuda::merge(mask_channels, expanded_mask, stream);
+            cv::cuda::multiply(
+                processed_float,
+                expanded_mask,
+                processed_float,
+                1.0,
+                -1,
+                stream);
+        }
+
+        processed_float.convertTo(processed, processed.type(), 1.0, 0.0, stream);
+    }
+
+    if (!options.save.output_dir.empty()) {
+        const std::filesystem::path directory(options.save.output_dir);
+        std::filesystem::create_directories(directory);
+        const std::filesystem::path output_file =
+            directory / (options.save.file_name + ".png");
+
+        cv::Mat output_cpu;
+        processed.download(output_cpu, stream);
+        stream.waitForCompletion();
+        if (!cv::imwrite(output_file.string(), output_cpu)) {
+            throw std::runtime_error(
+                "failed to save preprocessed image: " + output_file.string());
+        }
+    }
+
+    return processed;
+}
 
 cv::cuda::GpuMat cropImage(
-    const cv::cuda::GpuMat& d_imageInput,
-    bool enableFourSideCrop,
+    const cv::cuda::GpuMat& image_input,
+    bool enable_four_side_crop,
     int x,
     int y,
     int width,
-	int height,
-	bool isQw,
-	int x1Circle,
-	int y1Circle,
-	int x2Circle,
-	int y2Circle,
-	int radius,
-	const std::string& fileName,
-	const std::string& outputDir,
-	bool enableFourierTransform,
-	int filter_width,
-	double attenuation_factor,
-	int target_angle,
-	int angle_tolerance,
-	bool enable_denoising,
-	float denoise_h,
-	float denoise_hColor,
-    int denoise_searchWindowSize,
-    int denoise_templateWindowSize,
-    cv::cuda::Stream& stream)
-{
-	// 输入检查
-	if (d_imageInput.empty()) {
-		throw std::invalid_argument("输入图像为空");
-	}
+    int height,
+    bool is_qw,
+    int x1_circle,
+    int y1_circle,
+    int x2_circle,
+    int y2_circle,
+    int radius,
+    const std::string& file_name,
+    const std::string& output_dir,
+    bool enable_fourier_transform,
+    int filter_width,
+    double attenuation_factor,
+    int target_angle,
+    int angle_tolerance,
+    bool enable_denoising,
+    float denoise_h,
+    float denoise_h_color,
+    int denoise_search_window_size,
+    int denoise_template_window_size,
+    cv::cuda::Stream& stream) {
+    PreprocessOptions options;
+    options.crop.enabled = enable_four_side_crop;
+    options.crop.x = x;
+    options.crop.y = y;
+    options.crop.width = width;
+    options.crop.height = height;
 
-	int imgCols = d_imageInput.cols;
-	int imgRows = d_imageInput.rows;
+    options.qw_mask.enabled = is_qw;
+    options.qw_mask.x1 = x1_circle;
+    options.qw_mask.y1 = y1_circle;
+    options.qw_mask.x2 = x2_circle;
+    options.qw_mask.y2 = y2_circle;
+    options.qw_mask.radius = radius;
 
-	cv::cuda::GpuMat d_cropped;
+    options.save.file_name = file_name;
+    options.save.output_dir = output_dir;
 
-    if (enableFourSideCrop) {
-        if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
-            (x + width) > imgCols || (y + height) > imgRows) {
-            throw std::out_of_range("裁剪区域超出图像范围");
-        }
-        cv::Rect roi(x, y, width, height);
-        cv::cuda::GpuMat roi_view(d_imageInput, roi);
-        roi_view.copyTo(d_cropped, stream);
-    }
-    else {
-        d_imageInput.copyTo(d_cropped, stream);
-    }
+    options.stripe.enabled = enable_fourier_transform;
+    options.stripe.filter_width = filter_width;
+    options.stripe.attenuation_factor = attenuation_factor;
+    options.stripe.target_angle = target_angle;
+    options.stripe.angle_tolerance = angle_tolerance;
+    options.stripe.denoise = enable_denoising;
+    options.stripe.denoise_h = denoise_h;
+    options.stripe.denoise_h_color = denoise_h_color;
+    options.stripe.denoise_search_window = denoise_search_window_size;
+    options.stripe.denoise_template_window = denoise_template_window_size;
 
-	// 傅里叶条纹去除
-	if (enableFourierTransform) {
-		StripeRemoval sr;
-		d_cropped = sr.remove_image_stripes(
-			d_cropped,
-			"",
-			filter_width,     // filter_width
-			attenuation_factor, // attenuation_factor
-			target_angle,     // target_angle
-			angle_tolerance,  // angle_tolerance
-			enable_denoising, // enable_denoising
-			denoise_h,       // denoise_h
-			denoise_hColor,  // denoise_hColor
-			denoise_searchWindowSize, // denoise_searchWindowSize
-			denoise_templateWindowSize,
-			stream
-		);
-	}
-
-	if (isQw) {
-		if (x1Circle < 0 || y1Circle < 0 || x2Circle < 0 || y2Circle < 0 || radius <= 0) {
-			throw std::invalid_argument("裁剪QW区域需要提供有效的x1Circle, y1Circle, x2Circle, y2Circle和radius参数");
-		}
-
-		// 计算圆相对裁剪区域的坐标
-		const int leftCenterX = enableFourSideCrop ? (x1Circle - x) : x1Circle;
-		const int leftCenterY = enableFourSideCrop ? (y1Circle - y) : y1Circle;
-		const int rightCenterX = enableFourSideCrop ? (x2Circle - x) : x2Circle;
-		const int rightCenterY = enableFourSideCrop ? (y2Circle - y) : y2Circle;
-
-		// 构建二值掩模（CPU），上传后在GPU进行逐元素乘法实现遮罩
-		cv::Mat mask(d_cropped.size(), CV_8UC1, cv::Scalar(255));
-		cv::circle(mask, cv::Point(leftCenterX, leftCenterY), radius, cv::Scalar(0), -1);
-		cv::circle(mask, cv::Point(rightCenterX, rightCenterY), radius, cv::Scalar(0), -1);
-
-        cv::cuda::GpuMat d_mask;
-        d_mask.upload(mask, stream);
-
-		// 根据图像通道数扩展掩模并进行乘法
-		cv::cuda::GpuMat d_mask_f;
-        d_mask.convertTo(d_mask_f, CV_32F, 1.0 / 255.0, 0.0, stream);
-
-		int ch = d_cropped.channels();
-		int float_type = CV_MAKETYPE(CV_32F, ch);
-        cv::cuda::GpuMat d_cropped_f;
-        d_cropped.convertTo(d_cropped_f, float_type, 1.0, 0.0, stream);
-
-        if (ch == 1) {
-            cv::cuda::multiply(d_cropped_f, d_mask_f, d_cropped_f, 1.0, -1, stream);
-        }
-        else {
-            std::vector<cv::cuda::GpuMat> channelsMask(ch, d_mask_f);
-            cv::cuda::GpuMat d_mask_fN;
-            cv::cuda::merge(channelsMask, d_mask_fN, stream);
-            cv::cuda::multiply(d_cropped_f, d_mask_fN, d_cropped_f, 1.0, -1, stream);
-        }
-
-        d_cropped_f.convertTo(d_cropped, d_cropped.type(), 1.0, 0.0, stream);
-    }
-
-	// 保存到磁盘（如需要）
-    if (!outputDir.empty()) {
-        std::filesystem::path outputPath(outputDir);
-        if (!std::filesystem::exists(outputPath)) {
-            std::filesystem::create_directories(outputPath);
-        }
-        std::string fullOutputPath = (outputPath / (fileName + ".png")).string();
-        cv::Mat h_output;
-        d_cropped.download(h_output, stream);
-        cv::imwrite(fullOutputPath, h_output);
-    }
-
-	return d_cropped;
+    return preprocessImage(image_input, options, stream);
 }

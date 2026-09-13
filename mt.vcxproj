@@ -1,65 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|Win32">
-      <Configuration>Debug</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|Win32">
-      <Configuration>Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Debug|x64">
-      <Configuration>Debug</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|x64">
-      <Configuration>Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
   </ItemGroup>
+
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{99a7a461-fa06-461b-9d98-c4eea1cef4c8}</ProjectGuid>
     <RootNamespace>mt</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-    <CudaToolkitCustomDir>D:\Software\cu118</CudaToolkitCustomDir>
   </PropertyGroup>
+
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
+
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
-    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props" />
     <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 11.8.props" />
   </ImportGroup>
-  <ImportGroup Label="Shared">
-  </ImportGroup>
+  <ImportGroup Label="Shared" />
+
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -72,63 +48,37 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LibraryPath>E:\ydk\op\ThirdParty\Sqlite\bin;$(LibraryPath)</LibraryPath>
+
+  <PropertyGroup Label="UserMacros">
+    <ThirdPartyRoot Condition="'$(ThirdPartyRoot)'==''">$(ProjectDir)..\ThirdParty</ThirdPartyRoot>
+    <TensorRTRoot Condition="'$(TensorRTRoot)'=='' and '$(TENSORRT_ROOT)'!=''">$(TENSORRT_ROOT)</TensorRTRoot>
+    <TensorRTRoot Condition="'$(TensorRTRoot)'==''">$(CUDA_PATH)\TensorRT</TensorRTRoot>
   </PropertyGroup>
+
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-    </ClCompile>
-    <Link>
-      <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-    </Link>
+    <ClCompile><WarningLevel>Level3</WarningLevel><SDLCheck>true</SDLCheck><PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions><ConformanceMode>true</ConformanceMode></ClCompile>
+    <Link><SubSystem>Console</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation></Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <FunctionLevelLinking>true</FunctionLevelLinking>
-      <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-    </ClCompile>
-    <Link>
-      <SubSystem>Console</SubSystem>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>true</OptimizeReferences>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-    </Link>
+    <ClCompile><WarningLevel>Level3</WarningLevel><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><SDLCheck>true</SDLCheck><PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions><ConformanceMode>true</ConformanceMode></ClCompile>
+    <Link><SubSystem>Console</SubSystem><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences><GenerateDebugInformation>true</GenerateDebugInformation></Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-    </ClCompile>
-    <Link>
-      <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-    </Link>
+    <ClCompile><WarningLevel>Level3</WarningLevel><SDLCheck>true</SDLCheck><PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions><ConformanceMode>true</ConformanceMode></ClCompile>
+    <Link><SubSystem>Console</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation></Link>
   </ItemDefinitionGroup>
+
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;NOMINMAX;ASIO_STANDALONE;
-_WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;NOMINMAX;ASIO_STANDALONE;_WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>..\ThirdParty\Sqlite\inc;..\ThirdParty\concurrentqueue;..\ThirdParty\jsoncpp\include;..\ThirdParty\event\include;..\ThirdParty\MPHdc\inc;..\ThirdParty\curl\include;..\ThirdParty\opencv[cuda118]\include;..\ThirdParty\Halcon\include\halconcpp;..\ThirdParty\trtyolo\include;..\ThirdParty\Halcon\include;D:\Software\cu118\TensorRT\include;..\ThirdParty\asio-standalone;..\ThirdParty\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ThirdPartyRoot)\Sqlite\inc;$(ThirdPartyRoot)\concurrentqueue;$(ThirdPartyRoot)\jsoncpp\include;$(ThirdPartyRoot)\event\include;$(ThirdPartyRoot)\MPHdc\inc;$(ThirdPartyRoot)\curl\include;$(ThirdPartyRoot)\opencv[cuda118]\include;$(ThirdPartyRoot)\Halcon\include\halconcpp;$(ThirdPartyRoot)\Halcon\include;$(ThirdPartyRoot)\trtyolo\include;$(ThirdPartyRoot)\asio-standalone;$(ThirdPartyRoot);$(TensorRTRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
-      <PreprocessToFile>false</PreprocessToFile>
       <AdditionalOptions>/source-charset:utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -136,9 +86,10 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;..\ThirdParty\jsoncpp\x64\lib\Release\jsoncpp.lib;..\ThirdParty\event\x64\lib\Release\*.lib;..\ThirdParty\curl\x64\lib\Release\libcurl.lib;..\ThirdParty\MPHdc\lib\x64\MPHdc_API.lib;..\ThirdParty\opencv[cuda118]\x64\vc17\lib\opencv_world4110.lib;..\ThirdParty\Halcon\lib\x64-win64\halconcpp.lib;..\ThirdParty\Halcon\lib\x64-win64\hdevenginecpp.lib;..\ThirdParty\trtyolo\lib\trtyolo.lib;..\ThirdParty\trtyolo\lib\custom_plugins.lib;..\ThirdParty\Sqlite\dll\sqlite3.lib;D:\Software\cu118\TensorRT\lib\nvinfer_10.lib;D:\Software\cu118\TensorRT\lib\nvonnxparser_10.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;$(ThirdPartyRoot)\jsoncpp\x64\lib\Release\jsoncpp.lib;$(ThirdPartyRoot)\event\x64\lib\Release\*.lib;$(ThirdPartyRoot)\curl\x64\lib\Release\libcurl.lib;$(ThirdPartyRoot)\MPHdc\lib\x64\MPHdc_API.lib;$(ThirdPartyRoot)\opencv[cuda118]\x64\vc17\lib\opencv_world4110.lib;$(ThirdPartyRoot)\Halcon\lib\x64-win64\halconcpp.lib;$(ThirdPartyRoot)\Halcon\lib\x64-win64\hdevenginecpp.lib;$(ThirdPartyRoot)\trtyolo\lib\trtyolo.lib;$(ThirdPartyRoot)\trtyolo\lib\custom_plugins.lib;$(ThirdPartyRoot)\Sqlite\dll\sqlite3.lib;$(TensorRTRoot)\lib\nvinfer_10.lib;$(TensorRTRoot)\lib\nvonnxparser_10.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+
   <ItemGroup>
     <ClCompile Include="Core\camera_thread.cpp" />
     <ClCompile Include="Core\Config.cpp" />
@@ -151,20 +102,28 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     <ClCompile Include="Core\detect\speedSam.cpp" />
     <ClCompile Include="Core\detect\StripeRemoval.cpp" />
     <ClCompile Include="Core\detect\trtyolo_slice.cpp" />
+    <ClCompile Include="Core\detection_pipeline.cpp" />
     <ClCompile Include="Core\detect_thread.cpp" />
     <ClCompile Include="Core\group_manager.cpp" />
+    <ClCompile Include="Core\http\detect_request_mapper.cpp" />
+    <ClCompile Include="Core\http\request_params.cpp" />
+    <ClCompile Include="Core\inspection_repository.cpp" />
     <ClCompile Include="Core\queue_manager.cpp" />
     <ClCompile Include="Core\Scheduler.cpp" />
     <ClCompile Include="Core\Server.cpp" />
     <ClCompile Include="Core\single_detect_thread.cpp" />
     <ClCompile Include="Core\slide_serial.cpp" />
-    <ClCompile Include="Core\sqlite_herpler.cpp" />
+    <ClCompile Include="Core\sqlite_helper.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
+
   <ItemGroup>
     <ClInclude Include="Core\camera_thread.hpp" />
     <ClInclude Include="Core\Config.hpp" />
     <ClInclude Include="Core\db_utils.hpp" />
+    <ClInclude Include="Core\detect_params.hpp" />
+    <ClInclude Include="Core\detection_context.hpp" />
+    <ClInclude Include="Core\detection_pipeline.hpp" />
     <ClInclude Include="Core\detect\config.h" />
     <ClInclude Include="Core\detect\crop_image.h" />
     <ClInclude Include="Core\detect\cuda_utils.h" />
@@ -172,6 +131,7 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     <ClInclude Include="Core\detect\HalconProcessor.h" />
     <ClInclude Include="Core\detect\logging.h" />
     <ClInclude Include="Core\detect\macros.h" />
+    <ClInclude Include="Core\detect\preprocess_options.hpp" />
     <ClInclude Include="Core\detect\sam.h" />
     <ClInclude Include="Core\detect\Slice.h" />
     <ClInclude Include="Core\detect\speedSam.h" />
@@ -179,8 +139,12 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     <ClInclude Include="Core\detect\trtyolo_slice.hpp" />
     <ClInclude Include="Core\detect_thread.hpp" />
     <ClInclude Include="Core\group_manager.hpp" />
+    <ClInclude Include="Core\http\detect_request_mapper.hpp" />
+    <ClInclude Include="Core\http\request_params.hpp" />
     <ClInclude Include="Core\image_types.hpp" />
+    <ClInclude Include="Core\inspection_repository.hpp" />
     <ClInclude Include="Core\queue_manager.hpp" />
+    <ClInclude Include="Core\runtime_state.hpp" />
     <ClInclude Include="Core\Scheduler.hpp" />
     <ClInclude Include="Core\Server.hpp" />
     <ClInclude Include="Core\single_detect_thread.hpp" />
@@ -189,9 +153,7 @@ _WEBSOCKETPP_CPP11_STL_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     <ClInclude Include="Core\Utils\Common.hpp" />
     <ClInclude Include="Core\Utils\Log.hpp" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="File.cu" />
-  </ItemGroup>
+
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 11.8.targets" />

@@ -1,141 +1,126 @@
-﻿#include "speedSam.h"
+#include "speedSam.h"
+
 #include "config.h"
 
-SpeedSam::SpeedSam(std::string encoderPath, std::string decoderPath)
-{
-	// 使用提供的模型路径初始化图像编码器和掩码解码器
-	mImageEncoder = new EngineTRT(encoderPath,
-		{ "image" },                       // 编码器的输入名称
-		{ "image_embeddings" },           // 编码器的输出名称
-		false,                             // 不使用动态形状
-		true);                             // 使用FP16精度
+#include <algorithm>
+#include <stdexcept>
 
-	mMaskDecoder = new EngineTRT(decoderPath,
-		{ "image_embeddings", "point_coords", "point_labels", "mask_input", "has_mask_input" }, // 解码器的输入名称
-		{ "iou_predictions", "low_res_masks" }, // 解码器的输出名称
-		true,                               // 使用动态形状
-		false);                             // 不使用FP16精度
+SpeedSam::SpeedSam(const std::string& encoder_path, const std::string& decoder_path)
+    : mFeatures(HIDDEN_DIM * FEATURE_WIDTH * FEATURE_HEIGHT),
+      mMaskInput(HIDDEN_DIM * HIDDEN_DIM, 0.0f),
+      mIouPrediction(NUM_LABELS),
+      mLowResMasks(NUM_LABELS * HIDDEN_DIM * HIDDEN_DIM) {
+    mImageEncoder = std::make_unique<EngineTRT>(
+        encoder_path,
+        std::vector<std::string>{"image"},
+        std::vector<std::string>{"image_embeddings"},
+        false,
+        true);
 
-	/*if (encoderPath.find(".onnx") != std::string::npos && g_server_state.config != nullptr) {
-		std::string encoderEnginePath = g_server_state.config->modelDir + "\\SAM\\SAM_encoder.engine";
-		mImageEncoder->saveEngine(encoderEnginePath);
-	}
-	if (decoderPath.find(".onnx") != std::string::npos && g_server_state.config != nullptr) {
-		std::string decoderEnginePath = g_server_state.config->modelDir + "\\SAM\\SAM_mask_decoder.engine";
-		mMaskDecoder->saveEngine(decoderEnginePath);
-	}*/
-
-	// 为模型特征和输入分配内存
-	mFeatures = new float[HIDDEN_DIM * FEATURE_WIDTH * FEATURE_HEIGHT];
-	mMaskInput = new float[HIDDEN_DIM * HIDDEN_DIM];
-	mHasMaskInput = new float;             // 掩码输入存在的指针
-	mIouPrediction = new float[NUM_LABELS]; // IOU预测输出
-	mLowResMasks = new float[NUM_LABELS * HIDDEN_DIM * HIDDEN_DIM]; // 低分辨率掩码输出
+    mMaskDecoder = std::make_unique<EngineTRT>(
+        decoder_path,
+        std::vector<std::string>{
+            "image_embeddings", "point_coords", "point_labels", "mask_input", "has_mask_input"},
+        std::vector<std::string>{"iou_predictions", "low_res_masks"},
+        true,
+        false);
 }
 
-SpeedSam::~SpeedSam()
-{
-	// 清理动态分配的内存
-	if (mFeatures)      delete[] mFeatures;
-	if (mMaskInput)     delete[] mMaskInput;
-	if (mIouPrediction) delete[] mIouPrediction;
-	if (mLowResMasks)   delete[] mLowResMasks;
+cv::Mat SpeedSam::predict(
+    cv::Mat& image,
+    const std::vector<cv::Point>& points,
+    const std::vector<float>& labels) {
+    if (image.empty()) throw std::invalid_argument("SpeedSam input image is empty");
+    if (points.empty()) return cv::Mat::zeros(image.rows, image.cols, CV_32FC1);
+    if (labels.size() != points.size()) {
+        throw std::invalid_argument("SpeedSam points/labels size mismatch");
+    }
 
-	if (mImageEncoder)  delete mImageEncoder;
-	if (mMaskDecoder)   delete mMaskDecoder;
+    cv::Mat resized_image = resizeImage(image, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT);
+    mImageEncoder->setInput(resized_image);
+    if (!mImageEncoder->infer()) throw std::runtime_error("SAM encoder inference failed");
+    mImageEncoder->getOutput(mFeatures.data());
+
+    std::vector<float> point_data(points.size() * 2);
+    prepareDecoderInput(points, point_data.data(), image.cols, image.rows);
+
+    mMaskDecoder->setInput(
+        mFeatures.data(),
+        point_data.data(),
+        labels.data(),
+        mMaskInput.data(),
+        &mHasMaskInput,
+        static_cast<int>(points.size()));
+    if (!mMaskDecoder->infer()) throw std::runtime_error("SAM decoder inference failed");
+    mMaskDecoder->getOutput(mIouPrediction.data(), mLowResMasks.data());
+
+    cv::Mat mask(HIDDEN_DIM, HIDDEN_DIM, CV_32FC1, mLowResMasks.data());
+    upscaleMask(mask, image.cols, image.rows);
+    return mask.clone();
 }
 
-cv::Mat SpeedSam::predict(cv::Mat& image, std::vector<cv::Point> points, std::vector<float> labels)
-{
-	// 如果没有提供点，返回空掩码
-	if (points.size() == 0) return cv::Mat(image.rows, image.cols, CV_32FC1);
+void SpeedSam::prepareDecoderInput(
+    const std::vector<cv::Point>& points,
+    float* point_data,
+    int image_width,
+    int image_height) {
+    if (!point_data || image_width <= 0 || image_height <= 0) {
+        throw std::invalid_argument("invalid SAM decoder input");
+    }
 
-	// 为编码器预处理输入图像
-	auto resizedImage = resizeImage(image, MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT);
+    const float scale = MODEL_INPUT_WIDTH /
+        static_cast<float>(std::max(image_width, image_height));
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        point_data[i * 2] = static_cast<float>(points[i].x) * scale;
+        point_data[i * 2 + 1] = static_cast<float>(points[i].y) * scale;
+    }
 
-	// 使用图像编码器进行推理
-	mImageEncoder->setInput(resizedImage);
-	mImageEncoder->infer();
-	mImageEncoder->getOutput(mFeatures);
-
-	// 为指定点准备解码器输入数据
-	auto pointData = new float[2 * points.size()]; // 用于保存缩放后点坐标的数组
-	prepareDecoderInput(points, pointData, points.size(), image.cols, image.rows);
-
-	// 使用掩码解码器进行推理
-	mMaskDecoder->setInput(mFeatures, pointData, labels.data(), mMaskInput, mHasMaskInput, points.size());
-	mMaskDecoder->infer();
-	mMaskDecoder->getOutput(mIouPrediction, mLowResMasks);
-
-	// 后处理输出掩码
-	cv::Mat imgMask(HIDDEN_DIM, HIDDEN_DIM, CV_32FC1, mLowResMasks);
-	upscaleMask(imgMask, image.cols, image.rows); // 上采样到原始图像尺寸
-
-	delete[] pointData; // 清理为点数据动态分配的内存
-
-	return imgMask; // 返回分割后的掩码
+    std::fill(mMaskInput.begin(), mMaskInput.end(), 0.0f);
+    mHasMaskInput = 0.0f;
 }
 
-void SpeedSam::prepareDecoderInput(std::vector<cv::Point>& points, float* pointData, int numPoints, int imageWidth, int imageHeight)
-{
-	float scale = MODEL_INPUT_WIDTH / std::max(imageWidth, imageHeight); // 计算缩放因子
+cv::Mat SpeedSam::resizeImage(const cv::Mat& image, int input_width, int input_height) {
+    if (image.empty() || input_width <= 0 || input_height <= 0) {
+        throw std::invalid_argument("invalid SAM resize input");
+    }
 
-	// 缩放点坐标
-	for (int i = 0; i < numPoints; i++)
-	{
-		pointData[i * 2] = (float)points[i].x * scale; // X坐标
-		pointData[i * 2 + 1] = (float)points[i].y * scale; // Y坐标
-	}
+    const float aspect_ratio = static_cast<float>(image.cols) / static_cast<float>(image.rows);
+    int resized_width = 0;
+    int resized_height = 0;
+    if (aspect_ratio >= 1.0f) {
+        resized_width = input_width;
+        resized_height = std::max(1, static_cast<int>(input_height / aspect_ratio));
+    }
+    else {
+        resized_width = std::max(1, static_cast<int>(input_width * aspect_ratio));
+        resized_height = input_height;
+    }
 
-	// 初始化掩码输入数据
-	for (int i = 0; i < HIDDEN_DIM * HIDDEN_DIM; i++)
-	{
-		mMaskInput[i] = 0; // 将掩码输入设置为零
-	}
-	*mHasMaskInput = 0; // 将存在掩码输入设置为假
+    cv::Mat resized;
+    cv::resize(image, resized, cv::Size(resized_width, resized_height), 0, 0, cv::INTER_LINEAR);
+    cv::Mat output = cv::Mat::zeros(input_height, input_width, CV_8UC3);
+    resized.copyTo(output(cv::Rect(0, 0, resized.cols, resized.rows)));
+    return output;
 }
 
-cv::Mat SpeedSam::resizeImage(cv::Mat& img, int inputWidth, int inputHeight)
-{
-	int w, h;
-	float aspectRatio = (float)img.cols / (float)img.rows; // 计算宽高比
+void SpeedSam::upscaleMask(cv::Mat& mask, int target_width, int target_height, int size) {
+    if (mask.empty() || target_width <= 0 || target_height <= 0 || size <= 0) {
+        throw std::invalid_argument("invalid SAM mask upscale input");
+    }
 
-	// 在保持宽高比的同时确定新尺寸
-	if (aspectRatio >= 1)
-	{
-		w = inputWidth;
-		h = int(inputHeight / aspectRatio);
-	}
-	else
-	{
-		w = int(inputWidth * aspectRatio);
-		h = inputHeight;
-	}
+    int limit_x = 0;
+    int limit_y = 0;
+    if (target_width > target_height) {
+        limit_x = size;
+        limit_y = std::max(1, size * target_height / target_width);
+    }
+    else {
+        limit_x = std::max(1, size * target_width / target_height);
+        limit_y = size;
+    }
 
-	// 创建新尺寸的图像
-	cv::Mat re(h, w, CV_8UC3);
-	cv::resize(img, re, re.size(), 0, 0, cv::INTER_LINEAR); // 调整原始图像大小
-	cv::Mat out(inputHeight, inputWidth, CV_8UC3, 0.0); // 初始化输出图像
-	re.copyTo(out(cv::Rect(0, 0, re.cols, re.rows))); // 将调整大小后的图像复制到输出
-
-	return out; // 返回调整大小后的图像
-}
-
-void SpeedSam::upscaleMask(cv::Mat& mask, int targetWidth, int targetHeight, int size)
-{
-	int limX, limY;
-	// 根据目标尺寸计算上采样的限制
-	if (targetWidth > targetHeight)
-	{
-		limX = size;
-		limY = size * targetHeight / targetWidth;
-	}
-	else
-	{
-		limX = size * targetWidth / targetHeight;
-		limY = size;
-	}
-
-	// 将掩码调整到目标尺寸
-	cv::resize(mask(cv::Rect(0, 0, limX, limY)), mask, cv::Size(targetWidth, targetHeight));
+    limit_x = std::min(limit_x, mask.cols);
+    limit_y = std::min(limit_y, mask.rows);
+    cv::Mat valid_region = mask(cv::Rect(0, 0, limit_x, limit_y));
+    cv::resize(valid_region, mask, cv::Size(target_width, target_height));
 }
