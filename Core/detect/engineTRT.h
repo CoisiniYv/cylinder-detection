@@ -8,8 +8,11 @@
 #include <string>
 #include <vector>
 
-// Minimal TensorRT engine wrapper used by SpeedSam.
-// Owns TensorRT objects, host/device buffers and one CUDA copy stream.
+// TensorRT engine wrapper used by SpeedSam.
+//
+// Owns TensorRT objects, host/device buffers and one CUDA transfer stream.
+// Public inputs/outputs are mapped by the configured tensor names rather than
+// assuming a particular engine enumeration order.
 class EngineTRT {
 public:
     EngineTRT(
@@ -52,16 +55,30 @@ private:
     void initialize(
         const std::vector<std::string>& input_names,
         const std::vector<std::string>& output_names);
-    void releaseBuffers() noexcept;
 
-    static std::size_t getSizeByDim(const nvinfer1::Dims& dims);
+    void releaseBuffers() noexcept;
+    void releaseResources() noexcept;
+
+    int tensorIndex(const std::string& tensor_name) const;
+    int inputIndex(std::size_t logical_index) const;
+    int outputIndex(std::size_t logical_index) const;
+
     void memcpyBuffers(bool copy_input, bool device_to_host, bool async, cudaStream_t stream);
     void copyInputToDeviceAsync(cudaStream_t stream);
     void copyOutputToHostAsync(cudaStream_t stream);
 
 private:
+    // Dims and indices are ordered according to the names passed by the caller,
+    // not according to TensorRT's internal tensor enumeration order.
+    std::vector<std::string> mInputNames;
+    std::vector<std::string> mOutputNames;
+    std::vector<int> mInputIndices;
+    std::vector<int> mOutputIndices;
     std::vector<nvinfer1::Dims> mInputDims;
     std::vector<nvinfer1::Dims> mOutputDims;
+
+    // Buffer vectors remain indexed by TensorRT engine tensor index because
+    // executeV2 consumes the binding array in engine order.
     std::vector<void*> mGpuBuffers;
     std::vector<float*> mCpuBuffers;
     std::vector<std::size_t> mBufferBindingBytes;
