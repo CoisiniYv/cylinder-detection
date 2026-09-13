@@ -24,13 +24,6 @@ static Json::Value detection_to_json(const Detection& d) {
 
 static void upsert_group(SQLiteHelper& db, const std::string& run_id, long long gid,
                          const std::string& device_id, const std::string& status) {
-    db.prepare("SELECT 1 FROM inspection_groups WHERE run_id=? AND group_id=?;");
-    db.bind(1, run_id);
-    db.bind(2, gid);
-    // SQLiteHelper currently exposes row-returning queries only through query(), so use
-    // INSERT ... ON CONFLICT to avoid constructing SQL with runtime strings.
-    db.step();
-
     db.prepare(
         "INSERT INTO inspection_groups(run_id,group_id,device_id,status) VALUES(?,?,?,?) "
         "ON CONFLICT(run_id,group_id) DO UPDATE SET device_id=excluded.device_id,status=excluded.status;");
