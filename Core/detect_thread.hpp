@@ -4,7 +4,10 @@
 #include "detection_context.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <thread>
 
 namespace XL {
@@ -28,13 +31,23 @@ public:
     DetectThread& operator=(const DetectThread&) = delete;
 
     void start();
+    bool waitUntilReady(std::string& error_message);
     void stop();
     void join();
     bool isRunning() const noexcept { return mRunning.load(std::memory_order_relaxed); }
     int index() const noexcept { return mIndex; }
 
 private:
+    enum class StartupState {
+        Idle,
+        Starting,
+        Ready,
+        Failed
+    };
+
     void run();
+    void markStartupReady();
+    void markStartupFailed(std::string message);
 
 private:
     int mIndex = 0;
@@ -43,6 +56,11 @@ private:
     DetectParams mParams;
     DetectionContext mContext;
     std::unique_ptr<DetectionPipeline> mPipeline;
+
+    std::mutex mStartupMutex;
+    std::condition_variable mStartupCondition;
+    StartupState mStartupState = StartupState::Idle;
+    std::string mStartupError;
 };
 
 } // namespace XL
