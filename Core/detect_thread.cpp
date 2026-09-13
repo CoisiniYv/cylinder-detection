@@ -4,6 +4,7 @@
 #include "detection_pipeline.hpp"
 #include "queue_manager.hpp"
 
+#include <exception>
 #include <string>
 #include <utility>
 
@@ -34,7 +35,42 @@ DetectThread::~DetectThread() {
 
 void DetectThread::start() {
     if (mRunning.exchange(true, std::memory_order_relaxed)) return;
-    mThread = std::thread(&DetectThread::run, this);
+
+    {
+        std::lock_guard<std::mutex> lock(mStartupMutex);
+        mStartupState = StartupState::Starting;
+        mStartupError.clear();
+    }
+
+    try {
+        mThread = std::thread(&DetectThread::run, this);
+    }
+    catch (const std::exception& e) {
+        mRunning.store(false, std::memory_order_relaxed);
+        markStartupFailed(std::string("failed to create worker thread: ") + e.what());
+    }
+    catch (...) {
+        mRunning.store(false, std::memory_order_relaxed);
+        markStartupFailed("failed to create worker thread: unknown exception");
+    }
+}
+
+bool DetectThread::waitUntilReady(std::string& error_message) {
+    std::unique_lock<std::mutex> lock(mStartupMutex);
+    mStartupCondition.wait(lock, [this] {
+        return mStartupState == StartupState::Ready ||
+               mStartupState == StartupState::Failed;
+    });
+
+    if (mStartupState == StartupState::Ready) {
+        error_message.clear();
+        return true;
+    }
+
+    error_message = mStartupError.empty()
+        ? "worker initialization failed"
+        : mStartupError;
+    return false;
 }
 
 void DetectThread::stop() {
@@ -45,21 +81,44 @@ void DetectThread::join() {
     if (mThread.joinable()) mThread.join();
 }
 
+void DetectThread::markStartupReady() {
+    {
+        std::lock_guard<std::mutex> lock(mStartupMutex);
+        mStartupState = StartupState::Ready;
+        mStartupError.clear();
+    }
+    mStartupCondition.notify_all();
+}
+
+void DetectThread::markStartupFailed(std::string message) {
+    {
+        std::lock_guard<std::mutex> lock(mStartupMutex);
+        mStartupState = StartupState::Failed;
+        mStartupError = std::move(message);
+    }
+    mStartupCondition.notify_all();
+}
+
 void DetectThread::run() {
     if (!mContext.valid()) {
-        LOGE("DetectThread[%d] output context is invalid", mIndex);
+        const std::string error = "output context is invalid";
+        LOGE("DetectThread[%d] %s", mIndex, error.c_str());
+        markStartupFailed(error);
         mRunning.store(false, std::memory_order_relaxed);
         return;
     }
 
     std::string configure_error;
     if (!mPipeline || !mPipeline->configure(mParams, configure_error)) {
+        if (configure_error.empty()) configure_error = "pipeline initialization failed";
         LOGE("DetectThread[%d] pipeline initialization failed: %s",
              mIndex, configure_error.c_str());
+        markStartupFailed(configure_error);
         mRunning.store(false, std::memory_order_relaxed);
         return;
     }
 
+    markStartupReady();
     LOGI("DetectThread[%d] ready on GPU %d", mIndex, mPipeline->gpuDevice());
 
     while (mRunning.load(std::memory_order_relaxed)) {
