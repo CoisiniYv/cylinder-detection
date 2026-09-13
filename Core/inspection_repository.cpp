@@ -38,14 +38,21 @@ long long upsertFace(SQLiteHelper& db,
         "INSERT INTO inspection_faces(run_id,group_id,face_index,saved_path,skeleton_path,original_path) "
         "VALUES(?,?,?,?,?,?) "
         "ON CONFLICT(run_id,group_id,face_index) DO UPDATE SET "
-        "saved_path=excluded.saved_path,skeleton_path=excluded.skeleton_path,original_path=excluded.original_path "
-        "RETURNING face_id;");
+        "saved_path=excluded.saved_path,skeleton_path=excluded.skeleton_path,original_path=excluded.original_path;");
     db.bind(1, run_id);
     db.bind(2, group_id);
     db.bind(3, face_index);
     db.bind(4, result.saved_path);
     db.bind(5, result.skeleton_path);
     db.bind(6, result.original_path);
+    db.step();
+
+    db.prepare(
+        "SELECT face_id FROM inspection_faces "
+        "WHERE run_id=? AND group_id=? AND face_index=?;");
+    db.bind(1, run_id);
+    db.bind(2, group_id);
+    db.bind(3, face_index);
     return db.stepInt64();
 }
 
