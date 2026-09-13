@@ -19,6 +19,7 @@
     <ClCompile Include="Core\detect_thread.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\Server.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\group_manager.cpp"><Filter>源文件\Core</Filter></ClCompile>
+    <ClCompile Include="Core\inspection_repository.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\Scheduler.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\slide_serial.cpp"><Filter>源文件\Core</Filter></ClCompile>
     <ClCompile Include="Core\sqlite_helper.cpp"><Filter>源文件\Core</Filter></ClCompile>
@@ -46,6 +47,7 @@
     <ClInclude Include="Core\detect_thread.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\group_manager.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\image_types.hpp"><Filter>头文件\Core</Filter></ClInclude>
+    <ClInclude Include="Core\inspection_repository.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\queue_manager.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\runtime_state.hpp"><Filter>头文件\Core</Filter></ClInclude>
     <ClInclude Include="Core\Scheduler.hpp"><Filter>头文件\Core</Filter></ClInclude>
