@@ -105,6 +105,8 @@
     <ClCompile Include="Core\detection_pipeline.cpp" />
     <ClCompile Include="Core\detect_thread.cpp" />
     <ClCompile Include="Core\group_manager.cpp" />
+    <ClCompile Include="Core\http\detect_request_mapper.cpp" />
+    <ClCompile Include="Core\http\request_params.cpp" />
     <ClCompile Include="Core\inspection_repository.cpp" />
     <ClCompile Include="Core\queue_manager.cpp" />
     <ClCompile Include="Core\Scheduler.cpp" />
@@ -129,6 +131,7 @@
     <ClInclude Include="Core\detect\HalconProcessor.h" />
     <ClInclude Include="Core\detect\logging.h" />
     <ClInclude Include="Core\detect\macros.h" />
+    <ClInclude Include="Core\detect\preprocess_options.hpp" />
     <ClInclude Include="Core\detect\sam.h" />
     <ClInclude Include="Core\detect\Slice.h" />
     <ClInclude Include="Core\detect\speedSam.h" />
@@ -136,6 +139,8 @@
     <ClInclude Include="Core\detect\trtyolo_slice.hpp" />
     <ClInclude Include="Core\detect_thread.hpp" />
     <ClInclude Include="Core\group_manager.hpp" />
+    <ClInclude Include="Core\http\detect_request_mapper.hpp" />
+    <ClInclude Include="Core\http\request_params.hpp" />
     <ClInclude Include="Core\image_types.hpp" />
     <ClInclude Include="Core\inspection_repository.hpp" />
     <ClInclude Include="Core\queue_manager.hpp" />
