@@ -118,12 +118,16 @@ void DetectThread::run() {
     catch (const std::exception& e) {
         LOGE("DetectThread[%d] startup failed: %s", mIndex, e.what());
         markStartupFailed(e.what());
+        // If startup created partial CUDA/TensorRT resources, release them on
+        // this worker thread while its selected CUDA device is still current.
+        mPipeline.reset();
         mRunning.store(false, std::memory_order_relaxed);
         return;
     }
     catch (...) {
         LOGE("DetectThread[%d] startup failed with unknown exception", mIndex);
         markStartupFailed("unknown startup exception");
+        mPipeline.reset();
         mRunning.store(false, std::memory_order_relaxed);
         return;
     }
@@ -160,6 +164,9 @@ void DetectThread::run() {
         publishResult(std::move(result));
     }
 
+    // DetectionPipeline owns device-bound TensorRT/CUDA state. Destroy it on
+    // the same worker thread that selected the CUDA device and created it.
+    mPipeline.reset();
     mRunning.store(false, std::memory_order_relaxed);
     LOGI("DetectThread[%d] stopped", mIndex);
 }
