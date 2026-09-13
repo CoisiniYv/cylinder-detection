@@ -1,366 +1,332 @@
-﻿#include "detect_thread.hpp"
-#include "queue_manager.hpp"
+#include "detect_thread.hpp"
 
-#include <opencv2/core/cuda.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
-#include <opencv2/core/cuda_stream_accessor.hpp>
+#include "Config.hpp"
+#include "Utils/Log.hpp"
+#include "queue_manager.hpp"
+#include "runtime_state.hpp"
+
 #include <cuda_runtime.h>
-#include <iostream>
+#include <opencv2/core/cuda.hpp>
+
+#include <algorithm>
+#include <filesystem>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace XL {
+namespace {
 
-	DetectThread::DetectThread(int thread_index, const DetectParams& params)
-		: mIndex(thread_index), mParams(params) {
-		mPreferPsImage = true; // 使用光度立体图，若没有则回退到RGB
-	}
+bool selectCudaDevice(int device, int worker_index) {
+    const cudaError_t cuda_error = cudaSetDevice(device);
+    if (cuda_error != cudaSuccess) {
+        LOGE("DetectThread[%d] cudaSetDevice(%d) failed: %s",
+             worker_index, device, cudaGetErrorString(cuda_error));
+        return false;
+    }
 
-	DetectThread::~DetectThread() {
-		stop();
-		join();
-	}
+    try {
+        cv::cuda::setDevice(device);
+        return true;
+    }
+    catch (const cv::Exception& e) {
+        LOGE("DetectThread[%d] cv::cuda::setDevice(%d) failed: %s",
+             worker_index, device, e.what());
+        return false;
+    }
+}
 
-	void DetectThread::start() {
-		if (mRunning.load()) return;
-		// 将模型初始化移到工作线程中，确保 CUDA 上下文在该线程创建并使用
-		mRunning.store(true);
-		mThread = std::thread(&DetectThread::run, this);
-	}
+std::pair<std::string, std::string> selectSamModels(const DetectParams& params) {
+    std::string encoder = params.sam_encoder_engine_file;
+    std::string decoder = params.sam_decoder_engine_file;
+    if (!encoder.empty() && !std::filesystem::exists(encoder)) encoder = params.sam_encoder_onnx_file;
+    if (!decoder.empty() && !std::filesystem::exists(decoder)) decoder = params.sam_decoder_onnx_file;
+    return {std::move(encoder), std::move(decoder)};
+}
 
-	void DetectThread::stop() {
-		mRunning.store(false);
-	}
+SingleImageResult makeFailedResult(const ImageFrame& frame, const std::string& message) {
+    SingleImageResult result;
+    result.meta = frame.meta;
+    result.processing_ok = false;
+    result.error_message = message;
+    return result;
+}
 
-	void DetectThread::join() {
-		if (mThread.joinable()) mThread.join();
-	}
+void publishResult(SingleImageResult&& result) {
+    if (!g_queue_manager.pushResult(std::move(result))) {
+        LOGE("failed to publish detection result because result queue is stopped");
+    }
+}
 
-	void DetectThread::run() {
-		try {
-			cv::cuda::setDevice(0);
-		}
-		catch (...) {
-		}
-		cudaError_t __devErr = cudaSetDevice(0);
-		if (__devErr != cudaSuccess) {
-			std::cerr << "DetectThread[" << mIndex << "]: cudaSetDevice failed: " << cudaGetErrorString(__devErr) << std::endl;
-			mRunning.store(false);
-			return;
-		}
+} // namespace
+
+DetectThread::DetectThread(int thread_index, const DetectParams& params)
+    : mIndex(thread_index), mParams(params) {}
+
+DetectThread::~DetectThread() {
+    stop();
+    join();
+}
+
+void DetectThread::start() {
+    if (mRunning.exchange(true, std::memory_order_relaxed)) return;
+    mThread = std::thread(&DetectThread::run, this);
+}
+
+void DetectThread::stop() {
+    mRunning.store(false, std::memory_order_relaxed);
+}
+
+void DetectThread::join() {
+    if (mThread.joinable()) mThread.join();
+}
+
+void DetectThread::run() {
+    if (!selectCudaDevice(mParams.gpu_device, mIndex)) {
+        mRunning.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    try {
+        trtyolo::InferOption infer_option;
+        infer_option.enableSwapRB();
+        mSliceDetector = std::make_unique<trtyolo::SliceDetector>(mParams.engine_file, infer_option);
+        mModelReady = true;
+    }
+    catch (const std::exception& e) {
+        LOGE("DetectThread[%d] detector initialization failed: %s", mIndex, e.what());
+        mRunning.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    try {
+        const auto [encoder, decoder] = selectSamModels(mParams);
+        if (!encoder.empty() && !decoder.empty()) {
+            mSam = std::make_unique<SamSegmenter>();
+            mSamReady = mSam->init(encoder, decoder);
+            if (!mSamReady) mSam.reset();
+        }
+    }
+    catch (const std::exception& e) {
+        LOGE("DetectThread[%d] SAM initialization failed: %s", mIndex, e.what());
+        mSam.reset();
+        mSamReady = false;
+    }
 
     cv::cuda::Stream stream;
-    cv::cuda::GpuMat d_input;
-    cv::cuda::GpuMat d_cropped;
-    cv::cuda::GpuMat o_cropped;
-    cv::Mat vis_cpu;
-    std::vector<SliceInfo> slices;
 
-		if (!mModelReady || !mSliceDetector) {
-			try {
-				trtyolo::InferOption infer_opt;
-				infer_opt.enableSwapRB();
-				mSliceDetector = std::make_unique<trtyolo::SliceDetector>(mParams.engine_file, infer_opt);
-				mModelReady = true;
-			}
-			catch (const std::exception& e) {
-				std::cerr << "DetectThread[" << mIndex << "]: model preload failed in run: " << e.what() << std::endl;
-				mModelReady = false;
-			}
-		}
-		std::this_thread::sleep_for(std::chrono::seconds(2));
-		// 初始化SAM分割器
-		if (!mSamReady || !mSam) {
-			try {
-				mSam = std::make_unique<SamSegmenter>();
+    while (mRunning.load(std::memory_order_relaxed)) {
+        ImageFrame frame;
+        if (!g_queue_manager.popRawBlocking(frame, 100)) {
+            if (g_queue_manager.stopped()) break;
+            continue;
+        }
 
-				std::string actualEncoderPath = mParams.sam_encoder_engine_file;
-				std::string actualDecoderPath = mParams.sam_decoder_engine_file;
-				if (!std::filesystem::exists(actualEncoderPath))
-					actualEncoderPath = mParams.sam_encoder_onnx_file;
-				if (!std::filesystem::exists(actualDecoderPath))
-					actualDecoderPath = mParams.sam_decoder_onnx_file;
-				const std::string encoderEngine = actualEncoderPath;
-				const std::string decoderEngine = actualDecoderPath;
-
-				if (encoderEngine.empty() || decoderEngine.empty()) {
-					std::cerr << "DetectThread[" << mIndex << "]: SAM engine paths are empty. Skip SAM init." << std::endl;
-					mSamReady = false;
-				}
-				else {
-					mSamReady = mSam->init(encoderEngine, decoderEngine);
-					if (!mSamReady) {
-						std::cerr << "DetectThread[" << mIndex << "]: SAM init failed." << std::endl;
-					}
-				}
-			}
-			catch (const std::exception& e) {
-				std::cerr << "DetectThread[" << mIndex << "]: SAM init exception: " << e.what() << std::endl;
-				mSamReady = false;
-			}
-			catch (...) {
-				std::cerr << "DetectThread[" << mIndex << "]: SAM init unknown exception." << std::endl;
-				mSamReady = false;
-			}
-		}
-		std::this_thread::sleep_for(std::chrono::seconds(1));
-		if (!mModelReady || !mSliceDetector) {
-			std::cerr << "DetectThread[" << mIndex << "]: model not ready, abort run." << std::endl;
-			mRunning.store(false);
-			return;
-		}
-		std::this_thread::sleep_for(std::chrono::seconds(1));
-		while (mRunning.load()) {
-			// 以短超时阻塞，便于响应 stop
-			ImageFrame frame;
-			const bool ok = g_queue_manager.popRawBlocking(frame, 100);
-			if (!ok) {
-				if (g_queue_manager.stopped()) break; // 全局队列停止
-				continue; // 超时或暂时无数据
-			}
-
-			// 选择源图
-			const cv::Mat& src = (mPreferPsImage && frame.has_ps()) ? frame.ps_image : frame.rgb_image;
-			if (src.empty()) {
-				continue;
-			}
-
-			extern ServerState g_server_state;
-			const std::string savePath = (g_server_state.config ? g_server_state.config->outputdir : std::string()) + "\\" + g_server_state.run_id + "\\" + std::to_string(frame.meta.group_id);
-
-			std::filesystem::create_directories(savePath);
-
-			std::string original_name = "original_g" + std::to_string(frame.meta.group_id) + "_i" + std::to_string(frame.meta.index_in_group);
-			std::string original_path = savePath + "\\" + original_name + ".png";
-			std::string skeleton_path;
-			std::string save_path;
-
-            d_input.upload(src, stream);
-
-			if (mParams.qw_index == frame.meta.index_in_group)
-			{
-                d_cropped = cropImage(
-                    d_input,
-                    mParams.enable_four_side_crop,
-                    mParams.crop_x, mParams.crop_y, mParams.crop_width, mParams.crop_height,
-                    mParams.is_qw,
-                    mParams.circle_x1, mParams.circle_y1, mParams.circle_x2, mParams.circle_y2, mParams.radius,
-                    "fft_image", "",
-                    mParams.enable_fourier_transform,
-                    mParams.filter_width,
-                    mParams.attenuation_factor,
-                    mParams.target_angle,
-                    mParams.angle_tolerance,
-                    mParams.enable_denoising,
-                    mParams.denoise_h,
-                    mParams.denoise_hColor,
-                    mParams.denoise_search_window,
-                    mParams.denoise_template_window,
-                    stream
-                );
-
-                o_cropped = cropImage(
-                    d_input,
-                    mParams.enable_four_side_crop,
-                    mParams.crop_x, mParams.crop_y, mParams.crop_width, mParams.crop_height,
-                    mParams.is_qw,
-                    mParams.circle_x1, mParams.circle_y1, mParams.circle_x2, mParams.circle_y2, mParams.radius,
-                    original_name, savePath,
-                    false,
-                    mParams.filter_width,
-                    mParams.attenuation_factor,
-                    mParams.target_angle,
-                    mParams.angle_tolerance,
-                    false,
-                    mParams.denoise_h,
-                    mParams.denoise_hColor,
-                    mParams.denoise_search_window,
-                    mParams.denoise_template_window,
-                    stream
-                );
-			}
-			else
-			{
-                d_cropped = cropImage(
-                    d_input,
-                    mParams.enable_four_side_crop,
-                    mParams.crop_x, mParams.crop_y, mParams.crop_width, mParams.crop_height,
-                    false,
-                    mParams.circle_x1, mParams.circle_y1, mParams.circle_x2, mParams.circle_y2, mParams.radius,
-                    "fft_image", "",
-                    mParams.enable_fourier_transform,
-                    mParams.filter_width,
-                    mParams.attenuation_factor,
-                    mParams.target_angle,
-                    mParams.angle_tolerance,
-                    mParams.enable_denoising,
-                    mParams.denoise_h,
-                    mParams.denoise_hColor,
-                    mParams.denoise_search_window,
-                    mParams.denoise_template_window,
-                    stream
-                );
-
-                o_cropped = cropImage(
-                    d_input,
-                    mParams.enable_four_side_crop,
-                    mParams.crop_x, mParams.crop_y, mParams.crop_width, mParams.crop_height,
-                    false,
-                    mParams.circle_x1, mParams.circle_y1, mParams.circle_x2, mParams.circle_y2, mParams.radius,
-                    original_name, savePath,
-                    false,
-                    mParams.filter_width,
-                    mParams.attenuation_factor,
-                    mParams.target_angle,
-                    mParams.angle_tolerance,
-                    false,
-                    mParams.denoise_h,
-                    mParams.denoise_hColor,
-                    mParams.denoise_search_window,
-                    mParams.denoise_template_window,
-                    stream
-                );
+        try {
+            const cv::Mat& source = (mPreferPsImage && frame.has_ps()) ? frame.ps_image : frame.rgb_image;
+            if (source.empty()) {
+                publishResult(makeFailedResult(frame, "input frame is empty"));
+                continue;
             }
-            //stream.waitForCompletion();
 
-			// Halcon 处理器：中心点检测（直接传入GPU图像，并传递流以保证下载/同步在同一流上）
-			std::vector<std::pair<double, double>> centers;
-			bool halcon_ok = false;
-			try {
-				// 读取上传目录（config.json -> uploadDir），目录规则：uploadDir/YYYYMMDD_HHMMSS_groupid
-				halcon_ok = mHalcon.processImage( 
-					d_cropped,
-					skeleton_path,
-					centers,
-					/*enableSaveToPath*/ !savePath.empty(),
-					/*savePath*/ savePath,
-					frame.meta.group_id,
-					frame.meta.index_in_group
-				);
-			}
-			catch (const std::exception& e) {
-				std::cerr << "HalconProcessor error: " << e.what() << std::endl;
-				halcon_ok = false;
-			}
+            const Config* config = g_runtime_state.config;
+            if (!config || g_runtime_state.run_id.empty()) {
+                publishResult(makeFailedResult(frame, "runtime output context is unavailable"));
+                continue;
+            }
 
-			if (!halcon_ok || centers.empty()) {
-				// 构造空结果并入队（可选）。这里选择跳过。
-				continue;
-			}
+            const std::filesystem::path output_dir =
+                std::filesystem::path(config->outputdir) /
+                g_runtime_state.run_id /
+                std::to_string(frame.meta.group_id);
+            std::filesystem::create_directories(output_dir);
 
-			// 提取切片
-            slices = ImageSlicer::extractSlicesGPU(
-                d_cropped,
+            const std::string original_name =
+                "original_g" + std::to_string(frame.meta.group_id) +
+                "_i" + std::to_string(frame.meta.index_in_group);
+            const std::string original_path = (output_dir / (original_name + ".png")).string();
+
+            cv::cuda::GpuMat input_gpu;
+            input_gpu.upload(source, stream);
+
+            const bool apply_qw_mask =
+                mParams.is_qw && mParams.qw_index == frame.meta.index_in_group;
+
+            cv::cuda::GpuMat processed_gpu = cropImage(
+                input_gpu,
+                mParams.enable_four_side_crop,
+                mParams.crop_x,
+                mParams.crop_y,
+                mParams.crop_width,
+                mParams.crop_height,
+                apply_qw_mask,
+                mParams.circle_x1,
+                mParams.circle_y1,
+                mParams.circle_x2,
+                mParams.circle_y2,
+                mParams.radius,
+                "fft_image",
+                "",
+                mParams.enable_fourier_transform,
+                mParams.filter_width,
+                mParams.attenuation_factor,
+                mParams.target_angle,
+                mParams.angle_tolerance,
+                mParams.enable_denoising,
+                mParams.denoise_h,
+                mParams.denoise_hColor,
+                mParams.denoise_search_window,
+                mParams.denoise_template_window,
+                stream);
+
+            cv::cuda::GpuMat visualization_source_gpu = cropImage(
+                input_gpu,
+                mParams.enable_four_side_crop,
+                mParams.crop_x,
+                mParams.crop_y,
+                mParams.crop_width,
+                mParams.crop_height,
+                apply_qw_mask,
+                mParams.circle_x1,
+                mParams.circle_y1,
+                mParams.circle_x2,
+                mParams.circle_y2,
+                mParams.radius,
+                original_name,
+                output_dir.string(),
+                false,
+                mParams.filter_width,
+                mParams.attenuation_factor,
+                mParams.target_angle,
+                mParams.angle_tolerance,
+                false,
+                mParams.denoise_h,
+                mParams.denoise_hColor,
+                mParams.denoise_search_window,
+                mParams.denoise_template_window,
+                stream);
+
+            // HALCON downloads from GpuMat using its own/default CUDA context.
+            // Make the producer stream complete before crossing that boundary.
+            stream.waitForCompletion();
+
+            std::string skeleton_path;
+            std::vector<std::pair<double, double>> centers;
+            if (!mHalcon.processImage(
+                    processed_gpu,
+                    skeleton_path,
+                    centers,
+                    true,
+                    output_dir.string(),
+                    frame.meta.group_id,
+                    frame.meta.index_in_group)) {
+                auto failed = makeFailedResult(frame, "HALCON preprocessing failed");
+                failed.original_path = original_path;
+                publishResult(std::move(failed));
+                continue;
+            }
+
+            SingleImageResult result;
+            result.meta = frame.meta;
+            result.original_path = original_path;
+            result.skeleton_path = skeleton_path;
+
+            // No centers is a valid no-defect result, not a missing frame.
+            if (centers.empty()) {
+                mHalcon.waitForAsyncOperations();
+                publishResult(std::move(result));
+                continue;
+            }
+
+            auto slices = ImageSlicer::extractSlicesGPU(
+                processed_gpu,
                 centers,
                 mParams.slice_distance,
                 false,
                 "",
                 mParams.slice_width,
                 mParams.slice_height,
-                stream
-            );
+                stream);
             if (slices.empty()) {
+                auto failed = makeFailedResult(frame, "slice extraction returned no images");
+                failed.original_path = original_path;
+                failed.skeleton_path = skeleton_path;
+                publishResult(std::move(failed));
                 continue;
             }
-            // 切片推理
-            trtyolo::DetectRes detres = mSliceDetector->process_sliced_images(
+
+            trtyolo::DetectRes detections = mSliceDetector->process_sliced_images(
                 slices,
                 mParams.nms_threshold,
                 mParams.conf_threshold,
-                std::vector<int>{0, 2}
-            );
+                mParams.allowed_class_indices);
 
-			// 可视化并保存
-            d_cropped.download(vis_cpu, stream);
+            cv::Mat visualization_cpu;
+            processed_gpu.download(visualization_cpu, stream);
             stream.waitForCompletion();
 
-			// 使用 SAM 进行分割并可视化；如SAM未就绪则回退到 YOLO 可视化
-			cv::Mat to_save;
-			// SAM 分割（若已成功初始化）
-			std::vector<double> areas_px; // 与 detres 对齐的像素面积
-			std::vector<double> lengths_px; // 与 detres 对齐的像素“长度”（以最小外接圆直径近似）
-			if (mSamReady && mSam) {
-				// 将 mm 阈值转换为像素阈值：
-				double pix_to_mm = mParams.pix_to_mm;
-				if (pix_to_mm <= 1e-9) {
-					// 防止除零；若未配置则按 1mm/pix 处理
-					pix_to_mm = 1.0;
-				}
-				float minAreaPx = 0.0f;
-				float minDiamPx = 0.0f;
-				if (mParams.min_area_mm2 > 0.0) {
-					minAreaPx = static_cast<float>(mParams.min_area_mm2 / (pix_to_mm * pix_to_mm));
-				}
-				if (mParams.min_diameter_mm > 0.0) {
-					minDiamPx = static_cast<float>(mParams.min_diameter_mm / pix_to_mm);
-				}
-				// 执行分割与筛选（masks 与 detres 一一对应），并直接复用 SAM 已计算的面积/直径
-				auto masks = mSam->inferFromDetections(vis_cpu, detres, minAreaPx, minDiamPx);
+            std::vector<double> areas_px;
+            std::vector<double> diameters_px;
+            std::string saved_path;
 
-				// 直接使用 SamSegmenter 的最近一次度量，避免二次计算
-				areas_px.assign(detres.num, 0.0);
-				lengths_px.assign(detres.num, 0.0);
-				const auto& samAreas = mSam->lastAreasPx();
-				const auto& samDiameters = mSam->lastDiametersPx();
-				for (int i = 0; i < detres.num; ++i) {
-					if (i < static_cast<int>(samAreas.size())) {
-						areas_px[i] = samAreas[i];
-					}
-					if (i < static_cast<int>(samDiameters.size())) {
-						lengths_px[i] = samDiameters[i];
-					}
-				}
+            if (mSamReady && mSam && detections.num > 0) {
+                double pixel_to_mm = mParams.pix_to_mm;
+                if (pixel_to_mm <= 1e-9) pixel_to_mm = 1.0;
+                const float min_area_px = mParams.min_area_mm2 > 0.0
+                    ? static_cast<float>(mParams.min_area_mm2 / (pixel_to_mm * pixel_to_mm))
+                    : 0.0f;
+                const float min_diameter_px = mParams.min_diameter_mm > 0.0
+                    ? static_cast<float>(mParams.min_diameter_mm / pixel_to_mm)
+                    : 0.0f;
 
-				cv::Mat seg_vis = mSam->visualize(o_cropped, save_path, detres, masks, !savePath.empty(), savePath, frame.meta.group_id, frame.meta.index_in_group);
-				to_save = seg_vis.empty() ? vis_cpu : seg_vis;
-			}
+                auto masks = mSam->inferFromDetections(
+                    visualization_cpu, detections, min_area_px, min_diameter_px);
+                areas_px = mSam->lastAreasPx();
+                diameters_px = mSam->lastDiametersPx();
+                mSam->visualize(
+                    visualization_source_gpu,
+                    saved_path,
+                    detections,
+                    masks,
+                    true,
+                    output_dir.string(),
+                    frame.meta.group_id,
+                    frame.meta.index_in_group);
+            }
 
-			mHalcon.waitForAsyncOperations();
+            result.saved_path = saved_path;
+            result.detections.reserve(static_cast<std::size_t>(std::max(0, detections.num)));
 
-            // o_cropped.release();
-            // d_cropped.release();
-            // d_input.release();
-            vis_cpu.release();
-            slices.clear();
+            const double pixel_scale = mParams.pix_to_mm > 0.0 ? mParams.pix_to_mm : 1.0;
+            const double area_scale = pixel_scale * pixel_scale;
+            for (int i = 0; i < detections.num; ++i) {
+                Detection detection;
+                detection.label_id = detections.classes[i];
+                detection.confidence = detections.scores[i];
+                const auto& box = detections.boxes[i];
+                detection.box.x = static_cast<int>(box.left);
+                detection.box.y = static_cast<int>(box.top);
+                detection.box.w = static_cast<int>(box.right - box.left);
+                detection.box.h = static_cast<int>(box.bottom - box.top);
+                if (i < static_cast<int>(areas_px.size())) detection.area = areas_px[i] * area_scale;
+                if (i < static_cast<int>(diameters_px.size())) detection.length = diameters_px[i] * pixel_scale;
+                result.detections.emplace_back(std::move(detection));
+            }
 
-			// 构造结果并入队
-			SingleImageResult result;
-			result.meta = frame.meta;
+            mHalcon.waitForAsyncOperations();
+            publishResult(std::move(result));
+        }
+        catch (const std::exception& e) {
+            LOGE("DetectThread[%d] frame processing failed: %s", mIndex, e.what());
+            publishResult(makeFailedResult(frame, e.what()));
+        }
+        catch (...) {
+            LOGE("DetectThread[%d] frame processing failed with unknown exception", mIndex);
+            publishResult(makeFailedResult(frame, "unknown processing exception"));
+        }
+    }
 
-			result.saved_path = save_path;
-			if (!skeleton_path.empty()) {
-				result.skeleton_path = skeleton_path;
-			}
-			result.original_path = original_path;
-
-			result.detections.reserve(detres.num);
-
-			float pix2 = mParams.pix_to_mm * mParams.pix_to_mm;
-			float pix1 = mParams.pix_to_mm;
-			if (mParams.pix_to_mm == 0)
-			{
-				pix2 = 1.0f;
-				pix1 = 1.0f;
-			}
-			for (int i = 0; i < detres.num; ++i) {
-				Detection d;
-				d.label_id = detres.classes[i];
-				d.confidence = detres.scores[i];
-				const auto& b = detres.boxes[i];
-				d.box.x = static_cast<int>(b.left);
-				d.box.y = static_cast<int>(b.top);
-				d.box.w = static_cast<int>(b.right - b.left);
-				d.box.h = static_cast<int>(b.bottom - b.top);
-				if (i < static_cast<int>(areas_px.size())) d.area = areas_px[i] * pix2;
-				if (i < static_cast<int>(lengths_px.size())) d.length = lengths_px[i] * pix1;
-				result.detections.push_back(std::move(d));
-			}
-
-			stream.waitForCompletion();
-
-			g_queue_manager.pushResult(std::move(result));
-		}
-
-		mRunning.store(false);
-	}
+    mRunning.store(false, std::memory_order_relaxed);
+}
 
 } // namespace XL
