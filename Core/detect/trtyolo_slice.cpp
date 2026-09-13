@@ -2,6 +2,9 @@
 
 #include "../Utils/Log.hpp"
 
+#include <opencv2/dnn/dnn.hpp>
+#include <opencv2/imgproc.hpp>
+
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_set>
