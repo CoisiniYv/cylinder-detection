@@ -11,6 +11,7 @@
 #include "runtime_state.hpp"
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 namespace XL {
@@ -46,22 +47,11 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
     g_queue_manager.start();
 
     if (!g_camera_thread) g_camera_thread = std::make_shared<CameraThread>();
-    if (!g_camera_thread->isRunning()) {
-        if (!g_camera_thread->start(
-                mParams.delay_ms,
-                mParams.device_id,
-                config.slidePort,
-                config.slideAxisId,
-                config.slideTimeoutMs,
-                true)) {
-            LOGE("CameraThread startup failed");
-            g_queue_manager.stop();
-            return false;
-        }
-    }
     mCamera = g_camera_thread;
 
     try {
+        // Start all workers first so model initialization can run concurrently,
+        // then wait until every worker reports READY before touching hardware.
         mWorkers.reserve(static_cast<std::size_t>(num_detect_threads));
         for (int i = 0; i < num_detect_threads; ++i) {
             auto worker = std::make_unique<DetectThread>(
@@ -70,6 +60,16 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
                 detection_context);
             worker->start();
             mWorkers.emplace_back(std::move(worker));
+        }
+
+        for (const auto& worker : mWorkers) {
+            std::string startup_error;
+            if (!worker || !worker->waitUntilReady(startup_error)) {
+                const int worker_index = worker ? worker->index() : -1;
+                throw std::runtime_error(
+                    "DetectThread[" + std::to_string(worker_index) +
+                    "] failed to initialize: " + startup_error);
+            }
         }
 
         const std::string database_file =
@@ -90,6 +90,18 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
                 }
             });
         mGroupMgr->start();
+
+        // Hardware acquisition starts last. If CUDA/TensorRT initialization
+        // fails, no cylinder is moved and no camera frames are captured.
+        if (!mCamera->isRunning() && !mCamera->start(
+                mParams.delay_ms,
+                mParams.device_id,
+                config.slidePort,
+                config.slideAxisId,
+                config.slideTimeoutMs,
+                true)) {
+            throw std::runtime_error("CameraThread startup failed");
+        }
     }
     catch (const std::exception& e) {
         LOGE("Scheduler startup exception: %s", e.what());
