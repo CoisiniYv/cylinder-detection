@@ -4,6 +4,7 @@
 #include "Scheduler.hpp"
 #include "Utils/Log.hpp"
 #include "camera_thread.hpp"
+#include "detection_context.hpp"
 #include "image_types.hpp"
 #include "queue_manager.hpp"
 #include "runtime_state.hpp"
@@ -330,6 +331,14 @@ bool parseDetectParams(evhttp_request* req, RuntimeState* state, DetectParams& p
     return true;
 }
 
+DetectionContext makeDetectionContext(const RuntimeState* state) {
+    DetectionContext context;
+    if (!state || !state->config) return context;
+    context.output_root = state->config->outputdir;
+    context.run_id = state->run_id;
+    return context;
+}
+
 Json::Value toJson(const FrameMeta& meta) {
     Json::Value value;
     value["device_id"] = meta.device_id;
@@ -465,7 +474,14 @@ void apiSingleDetectAdd(evhttp_request* req, void* arg) {
         return;
     }
 
-    if (!g_single_thread) g_single_thread = std::make_unique<SingleDetectThread>();
+    if (!g_single_thread) {
+        DetectionContext context = makeDetectionContext(state);
+        if (!context.valid()) {
+            sendJson(req, -12, "runtime output context is unavailable");
+            return;
+        }
+        g_single_thread = std::make_unique<SingleDetectThread>(std::move(context));
+    }
 
     SingleImageResult result;
     if (!g_single_thread->submitAndWait(params, result, error)) {
@@ -520,8 +536,12 @@ void apiCameraSingleCapture(evhttp_request* req, void* arg) {
         return;
     }
 
-    const std::filesystem::path output_root = state->config ? state->config->outputdir : std::string();
-    const std::filesystem::path output_dir = output_root / state->run_id / "single";
+    const DetectionContext context = makeDetectionContext(state);
+    if (!context.valid()) {
+        sendJson(req, -22, "runtime output context is unavailable");
+        return;
+    }
+    const std::filesystem::path output_dir = context.singleOutputDir();
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
     if (ec) {
