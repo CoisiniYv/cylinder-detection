@@ -4,6 +4,7 @@
 #include "Utils/Log.hpp"
 #include "camera_thread.hpp"
 #include "detect_thread.hpp"
+#include "detection_context.hpp"
 #include "group_manager.hpp"
 #include "inspection_repository.hpp"
 #include "queue_manager.hpp"
@@ -34,12 +35,18 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
         return false;
     }
 
+    const Config& config = *g_runtime_state.config;
+    const DetectionContext detection_context{config.outputdir, g_runtime_state.run_id};
+    if (!detection_context.valid()) {
+        LOGE("detection output context is invalid");
+        return false;
+    }
+
     mParams = params;
     g_queue_manager.start();
 
     if (!g_camera_thread) g_camera_thread = std::make_shared<CameraThread>();
     if (!g_camera_thread->isRunning()) {
-        const Config& config = *g_runtime_state.config;
         if (!g_camera_thread->start(
                 mParams.delay_ms,
                 mParams.device_id,
@@ -57,12 +64,14 @@ bool Scheduler::start(const DetectParams& params, int num_detect_threads) {
     try {
         mWorkers.reserve(static_cast<std::size_t>(num_detect_threads));
         for (int i = 0; i < num_detect_threads; ++i) {
-            auto worker = std::make_unique<DetectThread>(i, mParams);
+            auto worker = std::make_unique<DetectThread>(
+                i,
+                mParams,
+                detection_context);
             worker->start();
             mWorkers.emplace_back(std::move(worker));
         }
 
-        const Config& config = *g_runtime_state.config;
         const std::string database_file =
             config.dbPath.empty() ? "my_inspection.db" : config.dbPath;
         auto repository = std::make_shared<InspectionRepository>(
