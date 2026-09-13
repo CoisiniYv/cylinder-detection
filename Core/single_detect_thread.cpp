@@ -127,6 +127,10 @@ void SingleDetectThread::worker() {
     }
 
     failPendingTasks("single-image worker stopped before processing task");
+
+    // DetectionPipeline owns CUDA/TensorRT resources. Destroy it here while
+    // this worker's selected CUDA device is still current on this thread.
+    mPipeline.reset();
     mRunning.store(false, std::memory_order_relaxed);
 }
 
