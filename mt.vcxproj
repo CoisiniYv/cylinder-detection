@@ -102,6 +102,7 @@
     <ClCompile Include="Core\detect\speedSam.cpp" />
     <ClCompile Include="Core\detect\StripeRemoval.cpp" />
     <ClCompile Include="Core\detect\trtyolo_slice.cpp" />
+    <ClCompile Include="Core\detection_pipeline.cpp" />
     <ClCompile Include="Core\detect_thread.cpp" />
     <ClCompile Include="Core\group_manager.cpp" />
     <ClCompile Include="Core\inspection_repository.cpp" />
@@ -119,6 +120,8 @@
     <ClInclude Include="Core\Config.hpp" />
     <ClInclude Include="Core\db_utils.hpp" />
     <ClInclude Include="Core\detect_params.hpp" />
+    <ClInclude Include="Core\detection_context.hpp" />
+    <ClInclude Include="Core\detection_pipeline.hpp" />
     <ClInclude Include="Core\detect\config.h" />
     <ClInclude Include="Core\detect\crop_image.h" />
     <ClInclude Include="Core\detect\cuda_utils.h" />
