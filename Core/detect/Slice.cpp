@@ -1,269 +1,202 @@
-#include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
 #include "Slice.h"
 
+#include <opencv2/imgcodecs.hpp>
 
-#include <iostream>
+#include <array>
+#include <cmath>
 #include <filesystem>
+#include <stdexcept>
+
+namespace {
+
+constexpr std::array<std::pair<int, int>, 5> kSliceOffsets{{
+    {0, 0},
+    {0, -1},
+    {0, 1},
+    {-1, 0},
+    {1, 0},
+}};
+
+void validateSliceArguments(int slice_width, int slice_height, int& distance) {
+    if (slice_width <= 0 || slice_height <= 0) {
+        throw std::invalid_argument("slice width and height must be positive");
+    }
+    distance = std::abs(distance);
+}
+
+} // namespace
 
 std::vector<SliceInfo> ImageSlicer::extractSlices(
-    const cv::Mat& originalImage,
-    const std::vector<std::pair<double, double>>& centerPoints,
+    const cv::Mat& original_image,
+    const std::vector<std::pair<double, double>>& center_points,
     int distance,
-    bool saveSlices,
-    const std::string& savePath,
-    int sliceWidth,
-    int sliceHeight) {
+    bool save_slices,
+    const std::string& save_path,
+    int slice_width,
+    int slice_height) {
+    validateSliceArguments(slice_width, slice_height, distance);
 
-	std::vector<SliceInfo> slices;
-	// 预留容量，避免多次扩容
-	slices.reserve(centerPoints.size() * 5);
+    std::vector<SliceInfo> slices;
+    if (original_image.empty() || center_points.empty()) return slices;
+    if (save_slices && save_path.empty()) save_slices = false;
+    if (save_slices) std::filesystem::create_directories(save_path);
 
-	// 检查原图是否为空
-	if (originalImage.empty()) {
-		std::cerr << "错误: 原图像为空!" << std::endl;
-		return slices;
-	}
+    slices.reserve(center_points.size() * kSliceOffsets.size());
+    for (std::size_t center_index = 0; center_index < center_points.size(); ++center_index) {
+        const auto [center_x, center_y] = center_points[center_index];
+        const std::size_t first_slice = slices.size();
 
-	// 检查中心点是否为空
-	if (centerPoints.empty()) {
-		std::cerr << "警告: 中心点向量为空!" << std::endl;
-		return slices;
-	}
+        for (const auto [x_direction, y_direction] : kSliceOffsets) {
+            slices.emplace_back(extractSingleSlice(
+                original_image,
+                center_x + static_cast<double>(x_direction * distance),
+                center_y + static_cast<double>(y_direction * distance),
+                slice_width,
+                slice_height));
+        }
 
-	// 检查距离参数
-	if (distance < 0) {
-		std::cerr << "警告: 距离参数为负值，将使用绝对值!" << std::endl;
-		distance = std::abs(distance);
-	}
-
-	// 检查保存路径
-	if (saveSlices && savePath.empty()) {
-		std::cerr << "警告: 启用了保存但保存路径为空，将不会保存切片!" << std::endl;
-		saveSlices = false;
-	}
-
-	// 创建保存目录
-	if (saveSlices && !savePath.empty()) {
-		std::filesystem::create_directories(savePath);
-	}
-
-	// 提取每个中心点的5个切片
-	for (size_t i = 0; i < centerPoints.size(); ++i) {
-		const auto& center = centerPoints[i];
-		double centerX = center.first;
-		double centerY = center.second;
-
-		// 中心点切片 (索引0)
-		SliceInfo centerSlice = extractSingleSlice(originalImage, centerX, centerY,
-			sliceWidth, sliceHeight);
-		// 推入向量时使用移动语义
-		slices.emplace_back(std::move(centerSlice));
-
-		// 上方切片 (索引1)
-		SliceInfo topSlice = extractSingleSlice(originalImage, centerX, centerY - distance,
-			sliceWidth, sliceHeight);
-		slices.emplace_back(std::move(topSlice));
-
-		// 下方切片 (索引2)
-		SliceInfo bottomSlice = extractSingleSlice(originalImage, centerX, centerY + distance,
-			sliceWidth, sliceHeight);
-		slices.emplace_back(std::move(bottomSlice));
-
-		// 左方切片 (索引3)
-		SliceInfo leftSlice = extractSingleSlice(originalImage, centerX - distance, centerY,
-			sliceWidth, sliceHeight);
-		slices.emplace_back(std::move(leftSlice));
-
-		// 右方切片 (索引4)
-		SliceInfo rightSlice = extractSingleSlice(originalImage, centerX + distance, centerY,
-			sliceWidth, sliceHeight);
-		slices.emplace_back(std::move(rightSlice));
-
-		// 保存切片（如果需要）
-		if (saveSlices) {
-			saveSliceImage(centerSlice.slice, savePath, static_cast<int>(i), 0);
-			saveSliceImage(topSlice.slice, savePath, static_cast<int>(i), 1);
-			saveSliceImage(bottomSlice.slice, savePath, static_cast<int>(i), 2);
-			saveSliceImage(leftSlice.slice, savePath, static_cast<int>(i), 3);
-			saveSliceImage(rightSlice.slice, savePath, static_cast<int>(i), 4);
-		}
-	}
-
-	std::cout << "成功提取 " << slices.size() << " 个切片 ("
-		<< centerPoints.size() << " 个中心点 × 5 个方向)" << std::endl;
-	return slices;
+        if (save_slices) {
+            for (std::size_t slice_index = 0; slice_index < kSliceOffsets.size(); ++slice_index) {
+                saveSliceImage(
+                    slices[first_slice + slice_index].slice,
+                    save_path,
+                    center_index,
+                    slice_index);
+            }
+        }
+    }
+    return slices;
 }
 
 SliceInfo ImageSlicer::extractSingleSlice(
-	const cv::Mat& originalImage,
-	double centerX,
-	double centerY,
-	int sliceWidth,
-	int sliceHeight) {
+    const cv::Mat& original_image,
+    double center_x,
+    double center_y,
+    int slice_width,
+    int slice_height) {
+    const int start_x = static_cast<int>(center_x - slice_width / 2.0);
+    const int start_y = static_cast<int>(center_y - slice_height / 2.0);
+    const int end_x = start_x + slice_width;
+    const int end_y = start_y + slice_height;
 
-	int imgWidth = originalImage.cols;
-	int imgHeight = originalImage.rows;
+    cv::Mat slice = cv::Mat::zeros(slice_height, slice_width, original_image.type());
 
-	// 计算切片边界
-	int startX = static_cast<int>(centerX - sliceWidth / 2.0);
-	int startY = static_cast<int>(centerY - sliceHeight / 2.0);
-	int endX = startX + sliceWidth;
-	int endY = startY + sliceHeight;
+    const int source_x0 = std::max(start_x, 0);
+    const int source_y0 = std::max(start_y, 0);
+    const int source_x1 = std::min(end_x, original_image.cols);
+    const int source_y1 = std::min(end_y, original_image.rows);
 
-	// 创建黑色背景的切片
-	cv::Mat slice = cv::Mat::zeros(sliceHeight, sliceWidth, originalImage.type());
+    const int copy_width = source_x1 - source_x0;
+    const int copy_height = source_y1 - source_y0;
+    if (copy_width > 0 && copy_height > 0) {
+        const int target_x = source_x0 - start_x;
+        const int target_y = source_y0 - start_y;
+        original_image(cv::Rect(source_x0, source_y0, copy_width, copy_height))
+            .copyTo(slice(cv::Rect(target_x, target_y, copy_width, copy_height)));
+    }
 
-	// 计算原图中实际可用的区域
-	int roiStartX = std::max(startX, 0);
-	int roiStartY = std::max(startY, 0);
-	int roiEndX = std::min(endX, imgWidth);
-	int roiEndY = std::min(endY, imgHeight);
-
-	// 计算切片中对应的区域
-	int sliceStartX = roiStartX - startX;
-	int sliceStartY = roiStartY - startY;
-	int sliceEndX = sliceStartX + (roiEndX - roiStartX);
-	int sliceEndY = sliceStartY + (roiEndY - roiStartY);
-
-	// 检查是否有重叠区域
-	if (roiStartX < roiEndX && roiStartY < roiEndY &&
-		sliceStartX >= 0 && sliceStartY >= 0 &&
-		sliceEndX <= sliceWidth && sliceEndY <= sliceHeight) {
-
-		// 提取原图中的区域
-		cv::Rect originalROI(roiStartX, roiStartY, roiEndX - roiStartX, roiEndY - roiStartY);
-		cv::Mat originalRegion = originalImage(originalROI);
-
-		// 复制到切片中对应的位置
-		cv::Rect sliceROI(sliceStartX, sliceStartY, sliceEndX - sliceStartX, sliceEndY - sliceStartY);
-		originalRegion.copyTo(slice(sliceROI));
-	}
-
-	return SliceInfo(slice, cv::Point(startX, startY));
-}
-
-void ImageSlicer::saveSliceImage(const cv::Mat& slice, const std::string& savePath,
-	int centerIndex, int sliceIndex) {
-	std::string filename = savePath + "/center_" + std::to_string(centerIndex) +
-		"_slice_" + std::to_string(sliceIndex) + ".png";
-
-	if (cv::imwrite(filename, slice)) {
-		std::cout << "切片 " << centerIndex << "_" << sliceIndex << " 已保存到: " << filename << std::endl;
-	}
-	else {
-		std::cerr << "错误: 无法保存切片 " << centerIndex << "_" << sliceIndex << " 到: " << filename << std::endl;
-	}
+    return SliceInfo(std::move(slice), cv::Point(start_x, start_y));
 }
 
 std::vector<SliceInfo> ImageSlicer::extractSlicesGPU(
-    const cv::cuda::GpuMat& originalImageGPU,
-    const std::vector<std::pair<double, double>>& centerPoints,
+    const cv::cuda::GpuMat& original_image,
+    const std::vector<std::pair<double, double>>& center_points,
     int distance,
-    bool saveSlices,
-    const std::string& savePath,
-    int sliceWidth,
-    int sliceHeight,
+    bool save_slices,
+    const std::string& save_path,
+    int slice_width,
+    int slice_height,
     cv::cuda::Stream& stream) {
+    validateSliceArguments(slice_width, slice_height, distance);
 
-	std::vector<SliceInfo> slices;
-	slices.reserve(centerPoints.size() * 5);
+    std::vector<SliceInfo> slices;
+    if (original_image.empty() || center_points.empty()) return slices;
+    if (save_slices && save_path.empty()) save_slices = false;
+    if (save_slices) std::filesystem::create_directories(save_path);
 
-	// 校验
-	if (originalImageGPU.empty()) {
-		std::cerr << "错误: 原图像(GPU)为空!" << std::endl;
-		return slices;
-	}
-	if (centerPoints.empty()) {
-		std::cerr << "警告: 中心点向量为空!" << std::endl;
-		return slices;
-	}
-	if (distance < 0) distance = std::abs(distance);
-	if (saveSlices && savePath.empty()) {
-		std::cerr << "警告: 启用了保存但保存路径为空，将不会保存切片!" << std::endl;
-		saveSlices = false;
-	}
-	if (saveSlices && !savePath.empty()) {
-		std::filesystem::create_directories(savePath);
-	}
+    slices.reserve(center_points.size() * kSliceOffsets.size());
+    for (const auto& center : center_points) {
+        for (const auto [x_direction, y_direction] : kSliceOffsets) {
+            slices.emplace_back(extractSingleSliceGPU(
+                original_image,
+                center.first + static_cast<double>(x_direction * distance),
+                center.second + static_cast<double>(y_direction * distance),
+                slice_width,
+                slice_height,
+                stream));
+        }
+    }
 
-	// GPU 提取每个中心点的5个切片
-	for (size_t i = 0; i < centerPoints.size(); ++i) {
-		const auto& center = centerPoints[i];
-		double centerX = center.first;
-		double centerY = center.second;
+    // Every SliceInfo contains a CPU cv::Mat populated by an asynchronous GPU
+    // download. The caller immediately hands those Mats to TensorRT, so the
+    // ownership boundary must guarantee that all downloads are complete.
+    stream.waitForCompletion();
 
-		// 中心点
-        SliceInfo centerSlice = extractSingleSliceGPU(originalImageGPU, centerX, centerY, sliceWidth, sliceHeight, stream);
-		slices.emplace_back(std::move(centerSlice));
+    if (save_slices) {
+        for (std::size_t center_index = 0; center_index < center_points.size(); ++center_index) {
+            const std::size_t first_slice = center_index * kSliceOffsets.size();
+            for (std::size_t slice_index = 0; slice_index < kSliceOffsets.size(); ++slice_index) {
+                saveSliceImage(
+                    slices[first_slice + slice_index].slice,
+                    save_path,
+                    center_index,
+                    slice_index);
+            }
+        }
+    }
 
-		// 上下左右
-        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX, centerY - distance, sliceWidth, sliceHeight, stream));
-        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX, centerY + distance, sliceWidth, sliceHeight, stream));
-        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX - distance, centerY, sliceWidth, sliceHeight, stream));
-        slices.emplace_back(extractSingleSliceGPU(originalImageGPU, centerX + distance, centerY, sliceWidth, sliceHeight, stream));
-
-		// 保存切片（如果需要）
-		if (saveSlices) {
-			saveSliceImage(slices[slices.size() - 5].slice, savePath, static_cast<int>(i), 0);
-			saveSliceImage(slices[slices.size() - 4].slice, savePath, static_cast<int>(i), 1);
-			saveSliceImage(slices[slices.size() - 3].slice, savePath, static_cast<int>(i), 2);
-			saveSliceImage(slices[slices.size() - 2].slice, savePath, static_cast<int>(i), 3);
-			saveSliceImage(slices[slices.size() - 1].slice, savePath, static_cast<int>(i), 4);
-		}
-	}
-
-	return slices;
+    return slices;
 }
 
 SliceInfo ImageSlicer::extractSingleSliceGPU(
-	const cv::cuda::GpuMat& originalImageGPU,
-	double centerX,
-	double centerY,
-	int sliceWidth,
-    int sliceHeight,
+    const cv::cuda::GpuMat& original_image,
+    double center_x,
+    double center_y,
+    int slice_width,
+    int slice_height,
     cv::cuda::Stream& stream) {
+    const int start_x = static_cast<int>(center_x - slice_width / 2.0);
+    const int start_y = static_cast<int>(center_y - slice_height / 2.0);
+    const int end_x = start_x + slice_width;
+    const int end_y = start_y + slice_height;
 
-	int imgWidth = originalImageGPU.cols;
-	int imgHeight = originalImageGPU.rows;
+    cv::cuda::GpuMat slice_gpu(slice_height, slice_width, original_image.type());
+    slice_gpu.setTo(cv::Scalar::all(0), stream);
 
-	// 计算切片边界
-	int startX = static_cast<int>(centerX - sliceWidth / 2.0);
-	int startY = static_cast<int>(centerY - sliceHeight / 2.0);
-	int endX = startX + sliceWidth;
-	int endY = startY + sliceHeight;
+    const int source_x0 = std::max(start_x, 0);
+    const int source_y0 = std::max(start_y, 0);
+    const int source_x1 = std::min(end_x, original_image.cols);
+    const int source_y1 = std::min(end_y, original_image.rows);
+    const int copy_width = source_x1 - source_x0;
+    const int copy_height = source_y1 - source_y0;
 
-	// 在GPU上创建黑色背景的切片
-	cv::cuda::GpuMat sliceGPU(sliceHeight, sliceWidth, originalImageGPU.type());
-    sliceGPU.setTo(cv::Scalar::all(0), stream);
+    if (copy_width > 0 && copy_height > 0) {
+        const int target_x = source_x0 - start_x;
+        const int target_y = source_y0 - start_y;
+        cv::cuda::GpuMat source_roi(
+            original_image,
+            cv::Rect(source_x0, source_y0, copy_width, copy_height));
+        cv::cuda::GpuMat target_roi(
+            slice_gpu,
+            cv::Rect(target_x, target_y, copy_width, copy_height));
+        source_roi.copyTo(target_roi, stream);
+    }
 
-	// 计算原图中实际可用的区域
-	int roiStartX = std::max(startX, 0);
-	int roiStartY = std::max(startY, 0);
-	int roiEndX = std::min(endX, imgWidth);
-	int roiEndY = std::min(endY, imgHeight);
+    cv::Mat slice;
+    slice_gpu.download(slice, stream);
+    return SliceInfo(std::move(slice), cv::Point(start_x, start_y));
+}
 
-	// 计算切片中对应的区域
-	int sliceStartX = roiStartX - startX;
-	int sliceStartY = roiStartY - startY;
-	int roiW = roiEndX - roiStartX;
-	int roiH = roiEndY - roiStartY;
-
-	if (roiW > 0 && roiH > 0 &&
-		sliceStartX >= 0 && sliceStartY >= 0 &&
-		sliceStartX + roiW <= sliceWidth &&
-		sliceStartY + roiH <= sliceHeight) {
-
-		// GPU ROI: 从原图拷贝到目标切片的对应位置
-		cv::Rect srcROI(roiStartX, roiStartY, roiW, roiH);
-		cv::Rect dstROI(sliceStartX, sliceStartY, roiW, roiH);
-		cv::cuda::GpuMat srcRegion(originalImageGPU, srcROI);
-		cv::cuda::GpuMat dstRegion(sliceGPU, dstROI);
-    srcRegion.copyTo(dstRegion, stream);
-	}
-
-	// 下载到CPU以供后续推理使用
-	cv::Mat slice;
-    sliceGPU.download(slice, stream);
-	return SliceInfo(slice, cv::Point(startX, startY));
+void ImageSlicer::saveSliceImage(
+    const cv::Mat& slice,
+    const std::string& save_path,
+    std::size_t center_index,
+    std::size_t slice_index) {
+    const std::filesystem::path output =
+        std::filesystem::path(save_path) /
+        ("center_" + std::to_string(center_index) +
+         "_slice_" + std::to_string(slice_index) + ".png");
+    if (!cv::imwrite(output.string(), slice)) {
+        throw std::runtime_error("failed to save slice: " + output.string());
+    }
 }
