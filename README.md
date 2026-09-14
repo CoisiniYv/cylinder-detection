@@ -475,8 +475,14 @@ TensorRT 封装按模型配置的 tensor name 建立输入输出映射，而不�
 | [`docs/CODE_AUDIT.md`](docs/CODE_AUDIT.md) | 工程审计与风险记录 |
 | [`docs/api.md`](docs/api.md) | HTTP API 参数与示例 |
 
-## License
+## License & Third-Party Software
 
-仓库当前未声明独立 License。
+本仓库源码的授权范围见 [`LICENSE`](LICENSE)。除单独声明的文件外，本项目源码默认保留全部权利；公开仓库本身不代表授予复制、修改、再分发、商业使用或再许可的权利。
 
-项目依赖 HALCON、TensorRT、工业相机 SDK 以及其他第三方组件；如需公开发布、商业部署或二进制分发，请同时遵守各第三方组件的授权条款。
+本项目依赖多个具有独立许可条款的第三方组件。第三方软件、SDK、驱动、模型和二进制文件不属于本项目源码许可的授权范围，使用者应根据实际部署环境自行取得相应授权并遵守其许可协议。
+
+其中 **MVTec HALCON 为商业软件**。构建、开发或部署包含 HALCON 的功能时，需要由使用者向 MVTec 或其授权渠道取得与使用场景相匹配的有效 HALCON 许可证。本仓库不提供 HALCON 软件授权、license 文件、license key，也不转授任何 HALCON 的开发或运行时使用权。
+
+同样，本仓库不会因为源代码公开而自动授予 NVIDIA CUDA / TensorRT、工业相机 SDK、设备驱动或其他第三方组件的再分发与商业使用权。相关组件仍分别受其原始许可协议约束。
+
+本仓库不包含任何商业软件许可证密钥，亦不应提交此类凭据。有关 HALCON 的许可类型、开发许可和运行时许可，请参阅 [MVTec HALCON Licensing](https://www.mvtec.com/products/halcon/editions-licensing/get-a-license)。
