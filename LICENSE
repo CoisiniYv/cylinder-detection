@@ -1,0 +1,54 @@
+Copyright (c) 2026 CoisiniYv. All rights reserved.
+
+# Cylinder Detection License
+
+This repository contains source code for the Cylinder Detection project.
+Unless otherwise stated in an individual file, the project source code is
+copyrighted by its respective author(s) and is made available without an
+open-source license grant.
+
+You may view and evaluate the source code in this repository. Any other use,
+including copying, modification, redistribution, sublicensing, commercial use,
+or incorporation into another product, requires prior permission from the
+copyright holder unless applicable law permits otherwise.
+
+## Third-Party Software
+
+This license applies only to the source code owned by this project. It does not
+grant any rights to third-party software, SDKs, libraries, models, drivers, or
+other components used by or referenced from the project.
+
+In particular, the project integrates with or depends on software including,
+but not limited to:
+
+- MVTec HALCON;
+- NVIDIA CUDA and TensorRT;
+- OpenCV;
+- libevent;
+- SQLite;
+- industrial camera SDKs and device drivers;
+- other libraries and model files required by the deployment environment.
+
+Each third-party component remains subject to its own license agreement,
+copyright notice, distribution terms, and usage restrictions.
+
+MVTec HALCON is commercial software. A valid HALCON license appropriate for the
+intended use is required separately from MVTec or an authorized distributor.
+This repository does not provide, transfer, sublicense, or include a HALCON
+license, HALCON license key, or any other commercial software entitlement.
+
+Likewise, publication of this source repository does not grant permission to
+redistribute proprietary SDK binaries, model files, drivers, or other
+third-party materials that may be required to build or run the system.
+
+Users and distributors are responsible for obtaining all required third-party
+licenses and for complying with the corresponding terms before building,
+running, deploying, or redistributing the software.
+
+## No Warranty
+
+THE SOFTWARE AND SOURCE CODE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
