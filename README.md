@@ -4,7 +4,35 @@
 
 系统通过滑台与工业相机完成圆柱工件的四面自动采集，在 GPU 上执行图像预处理、候选区域定位、切片检测和分割测量，并将四个面的检测结果聚合为完整工件结果，输出缺陷位置、类别、置信度、面积、尺寸以及 GOOD / NG 判定。
 
-> 目标运行环境：Windows x64、NVIDIA GPU、Visual Studio 2022。相机 SDK、HALCON、CUDA / TensorRT、OpenCV CUDA 等依赖需要在部署环境中正确配置。
+本仓库是整套检测设备的 **Windows 上位机视觉与推理端**。设备运动控制、标定、执行机构流程和 UART1 下位机协议由配套 STM32F4 固件项目 **[MCUcode](https://github.com/CoisiniYv/MCUcode)** 提供。两个仓库共同构成完整的工业检测系统。
+
+> 目标运行环境：Windows x64、NVIDIA GPU、Visual Studio 2022。相机 SDK、HALCON、CUDA / TensorRT、OpenCV CUDA 等依赖需要在部署环境中正确配置。完整自动化设备还需要运行配套的 MCUcode 固件。
+
+## 配套控制端：MCUcode
+
+[`MCUcode`](https://github.com/CoisiniYv/MCUcode) 是本项目对应的嵌入式设备控制端，两者职责相互独立：
+
+| 项目 | 运行位置 | 主要职责 |
+| --- | --- | --- |
+| **cylinder-detection** | Windows / NVIDIA GPU | HTTP 服务、工业相机采集、任务调度、GPU 推理、HALCON / YOLO / SAM、结果聚合、SQLite 持久化 |
+| **MCUcode** | STM32F4 | 多轴运动、标定、工位流程、执行机构控制、ERG/Modbus-RTU、UART1 上位机协议 |
+
+上位机通过 `SlideSerialClient` 与 MCU 的 UART1 通信。当前固件使用 ASCII 命令帧：
+
+```text
+<id>,<dir>,<steps>,<dly>\r\n
+```
+
+检测设备的主要流程命令包括：
+
+| `dir` | MCU 流程命令 | 用途 |
+| ---: | --- | --- |
+| `20` | `LOAD` | 工件上料 / 进入流程 |
+| `21` | `GOTO_CAM` | 移动到相机检测位置 |
+| `22` | `UNLOAD` | 工件下料 |
+| `23` | `CAM_NEXT` | 切换到下一检测面 |
+
+因此，本仓库负责“**看见、分析、判定和记录**”，MCUcode 负责“**移动、执行和反馈**”。
 
 ## 核心能力
 
@@ -17,6 +45,7 @@
 - **SQLite 持久化**：按运行、工件组、表面和缺陷四个层级保存检测记录。
 - **HTTP 控制接口**：提供任务启动、取消、健康检查、单图检测和相机控制接口。
 - **可配置部署**：模型目录、输出目录、数据库、GPU、Worker 数量、滑台串口和超时参数均通过配置文件管理。
+- **主从设备协同**：通过 UART 将视觉任务编排与 STM32F4 实时运动控制解耦。
 
 ## 系统架构
 
@@ -25,39 +54,48 @@ flowchart LR
     Client[Upper Computer / HTTP Client]
     Config[config.json]
 
-    subgraph Control[Control Plane]
-        Server[HTTP Server\nlibevent]
-        Mapper[Request Mapper\nJSON / Query -> DetectParams]
-        State[RuntimeState]
+    subgraph Host[Windows Host - cylinder-detection]
+        subgraph Control[Control Plane]
+            Server[HTTP Server\nlibevent]
+            Mapper[Request Mapper\nJSON / Query -> DetectParams]
+            State[RuntimeState]
+        end
+
+        subgraph Runtime[Runtime Orchestration]
+            Scheduler[Scheduler]
+            RawQ[(Raw Queue)]
+            ResultQ[(Result Queue)]
+            Group[GroupManager]
+        end
+
+        subgraph Hardware[Host Hardware Interface]
+            Camera[CameraThread\nMPHdc SDK]
+            Slide[SlideSerialClient\nUART transport]
+        end
+
+        subgraph Inference[Detection Pipeline]
+            Workers[DetectThread x N]
+            Single[SingleDetectThread]
+            Pipeline[DetectionPipeline]
+            Pre[GPU Preprocess]
+            Halcon[HALCON\nCenter Extraction]
+            Slice[GPU Slice]
+            YOLO[TensorRT YOLO]
+            SAM[SAM\nSegmentation & Measurement]
+        end
+
+        subgraph Storage[Persistence]
+            Repo[InspectionRepository]
+            DB[(SQLite)]
+            Files[(Output Files)]
+        end
     end
 
-    subgraph Runtime[Runtime Orchestration]
-        Scheduler[Scheduler]
-        RawQ[(Raw Queue)]
-        ResultQ[(Result Queue)]
-        Group[GroupManager]
-    end
-
-    subgraph Hardware[Hardware Layer]
-        Camera[CameraThread\nMPHdc SDK]
-        Slide[SlideSerialClient\nUART]
-    end
-
-    subgraph Inference[Detection Pipeline]
-        Workers[DetectThread x N]
-        Single[SingleDetectThread]
-        Pipeline[DetectionPipeline]
-        Pre[GPU Preprocess]
-        Halcon[HALCON\nCenter Extraction]
-        Slice[GPU Slice]
-        YOLO[TensorRT YOLO]
-        SAM[SAM\nSegmentation & Measurement]
-    end
-
-    subgraph Storage[Persistence]
-        Repo[InspectionRepository]
-        DB[(SQLite)]
-        Files[(Output Files)]
+    subgraph Controller[MCUcode - STM32F4]
+        MCUUART[UART1 Command Interface]
+        Flow[Workcell Flow]
+        Motor[Multi-axis Motor Control]
+        ERG[ERG / Modbus-RTU]
     end
 
     Config --> Server
@@ -67,9 +105,13 @@ flowchart LR
     Scheduler --> Workers
     Scheduler --> Group
     Scheduler --> Camera
+    Scheduler --> Slide
 
-    Camera <--> Slide
     Camera --> RawQ --> Workers
+    Slide <-->|115200 8N1| MCUUART
+    MCUUART --> Flow
+    Flow --> Motor
+    Flow --> ERG
 
     Workers --> Pipeline
     Single --> Pipeline
@@ -85,7 +127,7 @@ flowchart LR
 
 ## 检测流程
 
-一次完整的四面检测任务按照以下顺序运行：
+一次完整的四面检测任务由上位机视觉服务和 STM32 控制器协同完成：
 
 ```mermaid
 sequenceDiagram
@@ -94,6 +136,7 @@ sequenceDiagram
     participant SCH as Scheduler
     participant D as DetectThread x N
     participant CAM as CameraThread
+    participant MCU as MCUcode / STM32F4
     participant Q as QueueManager
     participant G as GroupManager
     participant DB as InspectionRepository
@@ -113,19 +156,22 @@ sequenceDiagram
         S-->>C: error response
     end
 
-    CAM->>CAM: LOAD -> GOTO_CAM
+    CAM->>MCU: LOAD / GOTO_CAM
+    MCU-->>CAM: flow / motion status
 
     loop 4 surfaces
         CAM->>Q: push ImageFrame
         Q->>D: dispatch frame
         D->>D: DetectionPipeline
         D->>Q: push SingleImageResult
-        CAM->>CAM: CAM_NEXT
+        CAM->>MCU: CAM_NEXT
+        MCU-->>CAM: motion completed
     end
 
     Q->>G: collect 4 results
     G->>DB: persist group / faces / detections
     G->>CAM: allow next group
+    CAM->>MCU: UNLOAD / next cycle
 ```
 
 ### 单帧检测流水线
@@ -174,7 +220,8 @@ SingleImageResult
 | SQLite | 检测结果持久化 |
 | ConcurrentQueue | 原始图像和结果队列 |
 | MPHdc SDK | 工业相机控制与图像采集 |
-| Serial / UART | 滑台控制与状态通信 |
+| Serial / UART | 上位机与 STM32 控制器通信 |
+| STM32F4 / MCUcode | 多轴运动、工位流程与执行机构控制 |
 
 ## 模块划分
 
@@ -185,8 +232,8 @@ SingleImageResult
 | `Server` | HTTP 路由、响应和应用服务入口 |
 | `Core/http/*` | HTTP 参数解析、检测参数映射和校验 |
 | `Scheduler` | 多面检测任务的生命周期编排 |
-| `CameraThread` | 相机采集与滑台检测时序 |
-| `SlideSerialClient` | 串口通信 |
+| `CameraThread` | 相机采集以及与设备运动流程的协同 |
+| `SlideSerialClient` | PC 侧 UART transport，与 MCUcode UART1 通信 |
 | `QueueManager` | 原始图像与检测结果的线程安全传递 |
 | `DetectThread` | 多面检测 Worker |
 | `SingleDetectThread` | 单图检测任务 Worker |
@@ -194,6 +241,7 @@ SingleImageResult
 | `GroupManager` | 四面检测结果聚合与超时管理 |
 | `InspectionRepository` | 检测结果的数据库事务持久化 |
 | `Core/detect/*` | 图像预处理、HALCON、切片、YOLO、SAM、TensorRT |
+| [`MCUcode`](https://github.com/CoisiniYv/MCUcode) | STM32F4 多轴运动、标定、工位流程、ERG/Modbus 与 UART1 协议 |
 
 详细的模块边界和依赖规则见 [`docs/MODULE_RESPONSIBILITIES.md`](docs/MODULE_RESPONSIBILITIES.md)。
 
@@ -244,6 +292,8 @@ SingleImageResult
 └── mt.vcxproj
 ```
 
+配套嵌入式固件位于独立仓库 [`CoisiniYv/MCUcode`](https://github.com/CoisiniYv/MCUcode)，不作为本仓库的 Git submodule 引入，以保持上位机与固件可以独立构建、发布和版本管理。
+
 ## 运行环境
 
 推荐环境：
@@ -259,6 +309,8 @@ Image           OpenCV CUDA
 Vision          HALCON
 Database        SQLite3
 HTTP            libevent
+Controller      STM32F4 running MCUcode (full automatic system)
+Host-MCU Link   UART 115200 8N1
 ```
 
 工程中的第三方依赖根目录通过 MSBuild property 配置：
@@ -303,9 +355,9 @@ TensorRTRoot
 | `gpuDevice` | CUDA device index |
 | `detectThreads` | 多面检测 Worker 数量 |
 | `groupTimeoutMs` | 四面结果聚合超时 |
-| `slidePort` | 滑台串口，例如 `COM11`；留空可禁用 |
+| `slidePort` | 连接 MCUcode 控制器的串口，例如 `COM11`；留空可禁用 |
 | `slideAxisId` | 滑台轴 ID |
-| `slideTimeoutMs` | 滑台通信超时 |
+| `slideTimeoutMs` | 上位机等待 MCU 流程 / 运动响应的超时 |
 
 ## 模型目录
 
@@ -344,6 +396,15 @@ http://127.0.0.1:9003
 ```
 
 实际地址由 `host` 和 `analyzerPort` 决定。
+
+完整自动检测模式下，还需要：
+
+1. 将 [`MCUcode`](https://github.com/CoisiniYv/MCUcode) 固件集成并烧录到目标 STM32F4 控制器；
+2. 通过 UART 将 Windows 主机与控制器连接；
+3. 将对应串口写入 `config.json` 的 `slidePort`；
+4. 完成设备运动、相机位置与工位流程标定后再启动自动检测任务。
+
+只使用单图检测接口时不要求 MCU 控制器在线。
 
 ## HTTP API
 
@@ -426,14 +487,20 @@ QueueManager
     -> DetectThread x N
         -> CUDA / TensorRT / SAM READY
             -> GroupManager
-                -> CameraThread / Slide
+                -> CameraThread
+                    -> SlideSerialClient
+                        -> MCUcode / STM32F4
 ```
 
-任意检测 Worker 初始化失败时，任务启动失败，不进入正式采集阶段。
+任意检测 Worker 初始化失败时，任务启动失败，不进入正式采集阶段，也不会提前触发 MCU 运动流程。
 
-采集帧通过 Raw Queue 分发给多个检测 Worker，检测结果通过 Result Queue 交给 `GroupManager` 聚合。
+采集帧通过 Raw Queue 分发给多个检测 Worker，检测结果通过 Result Queue 交给 `GroupManager` 聚合；设备运动和工位切换则由上位机通过 UART 请求 MCUcode 执行。
 
 ## 设计特点
+
+### 上位机与实时控制解耦
+
+Windows 服务负责计算密集型视觉算法和业务编排，STM32F4 负责时序敏感的运动与设备控制。两者通过明确的 UART 协议连接，使视觉算法和嵌入式控制可以分别开发、测试和升级。
 
 ### 显式检测上下文
 
@@ -474,6 +541,9 @@ TensorRT 封装按模型配置的 tensor name 建立输入输出映射，而不�
 | [`docs/STATIC_ANALYSIS.md`](docs/STATIC_ANALYSIS.md) | 文件级静态分析记录 |
 | [`docs/CODE_AUDIT.md`](docs/CODE_AUDIT.md) | 工程审计与风险记录 |
 | [`docs/api.md`](docs/api.md) | HTTP API 参数与示例 |
+| [`MCUcode`](https://github.com/CoisiniYv/MCUcode) | STM32F4 配套固件、UART1 协议、运动控制与设备流程 |
+
+MCU 侧 UART 协议和固件行为说明见 [`MCUcode/docs/uart1_firmware_alignment.md`](https://github.com/CoisiniYv/MCUcode/blob/master/docs/uart1_firmware_alignment.md)。
 
 ## License & Third-Party Software
 
