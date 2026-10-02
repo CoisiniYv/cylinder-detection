@@ -1,53 +1,53 @@
 # Cylinder Detection
 
-面向工业圆柱表面检测场景的多面视觉检测服务，基于 **C++20、OpenCV CUDA、TensorRT、HALCON、SAM、SQLite 与 libevent** 构建。
+A multi-surface visual inspection service for industrial cylindrical workpieces, built with **C++20, OpenCV CUDA, TensorRT, HALCON, SAM, SQLite, and libevent**.
 
-系统通过滑台与工业相机完成圆柱工件的四面自动采集，在 GPU 上执行图像预处理、候选区域定位、切片检测和分割测量，并将四个面的检测结果聚合为完整工件结果，输出缺陷位置、类别、置信度、面积、尺寸以及 GOOD / NG 判定。
+The system uses a linear stage and industrial camera to automatically acquire four views of each cylindrical workpiece. GPU processing performs image preprocessing, candidate-region localization, tiled detection, segmentation, and measurement. Results from all four surfaces are aggregated into a complete workpiece result, including defect locations, classes, confidence scores, areas, dimensions, and GOOD / NG decisions.
 
-本仓库是整套检测设备的 **Windows 上位机视觉与推理端**。设备运动控制、标定、执行机构流程和 UART1 下位机协议由配套 STM32F4 固件项目 **[MCUcode](https://github.com/CoisiniYv/MCUcode)** 提供。两个仓库共同构成完整的工业检测系统。
+This repository provides the **Windows host-side vision and inference service** for the inspection equipment. Motion control, calibration, actuator sequencing, and the UART1 device protocol are provided by the companion STM32F4 firmware project **[MCUcode](https://github.com/CoisiniYv/MCUcode)**. Together, the two repositories form a complete industrial inspection system.
 
-> 目标运行环境：Windows x64、NVIDIA GPU、Visual Studio 2022。相机 SDK、HALCON、CUDA / TensorRT、OpenCV CUDA 等依赖需要在部署环境中正确配置。完整自动化设备还需要运行配套的 MCUcode 固件。
+> Target environment: Windows x64, NVIDIA GPU, and Visual Studio 2022. Dependencies including the camera SDK, HALCON, CUDA / TensorRT, and OpenCV CUDA must be configured in the deployment environment. Full automation also requires the companion MCUcode firmware.
 
-## 配套控制端：MCUcode
+## Companion Controller: MCUcode
 
-[`MCUcode`](https://github.com/CoisiniYv/MCUcode) 是本项目对应的嵌入式设备控制端，两者职责相互独立：
+[`MCUcode`](https://github.com/CoisiniYv/MCUcode) provides embedded device control for this project. The two projects have distinct responsibilities:
 
-| 项目 | 运行位置 | 主要职责 |
+| Project | Runtime | Main Responsibilities |
 | --- | --- | --- |
-| **cylinder-detection** | Windows / NVIDIA GPU | HTTP 服务、工业相机采集、任务调度、GPU 推理、HALCON / YOLO / SAM、结果聚合、SQLite 持久化 |
-| **MCUcode** | STM32F4 | 多轴运动、标定、工位流程、执行机构控制、ERG/Modbus-RTU、UART1 上位机协议 |
+| **cylinder-detection** | Windows / NVIDIA GPU | HTTP service, industrial-camera acquisition, task scheduling, GPU inference, HALCON / YOLO / SAM, result aggregation, and SQLite persistence |
+| **MCUcode** | STM32F4 | Multi-axis motion, calibration, workcell sequencing, actuator control, ERG/Modbus-RTU, and the UART1 host protocol |
 
-上位机通过 `SlideSerialClient` 与 MCU 的 UART1 通信。当前固件使用 ASCII 命令帧：
+The host communicates with the MCU's UART1 through `SlideSerialClient`. The current firmware uses an ASCII command frame:
 
 ```text
 <id>,<dir>,<steps>,<dly>\r\n
 ```
 
-检测设备的主要流程命令包括：
+The main inspection workflow commands are:
 
-| `dir` | MCU 流程命令 | 用途 |
+| `dir` | MCU Flow Command | Purpose |
 | ---: | --- | --- |
-| `20` | `LOAD` | 工件上料 / 进入流程 |
-| `21` | `GOTO_CAM` | 移动到相机检测位置 |
-| `22` | `UNLOAD` | 工件下料 |
-| `23` | `CAM_NEXT` | 切换到下一检测面 |
+| `20` | `LOAD` | Load the workpiece / enter the workflow |
+| `21` | `GOTO_CAM` | Move to the camera inspection position |
+| `22` | `UNLOAD` | Unload the workpiece |
+| `23` | `CAM_NEXT` | Advance to the next inspection surface |
 
-因此，本仓库负责“**看见、分析、判定和记录**”，MCUcode 负责“**移动、执行和反馈**”。
+This repository handles **acquisition, analysis, decisions, and recording**; MCUcode handles **motion, execution, and feedback**.
 
-## 核心能力
+## Core Capabilities
 
-- **四面自动检测**：支持滑台上料、定位、转面、四面采集与组级结果聚合。
-- **GPU 检测流水线**：基于 OpenCV CUDA、TensorRT 和自定义切片检测实现 GPU 加速处理。
-- **多阶段缺陷分析**：组合图像预处理、HALCON 中心区域提取、YOLO 检测与 SAM 分割测量。
-- **多 Worker 并行推理**：检测线程数量可配置，采集与推理解耦。
-- **单图检测模式**：支持通过 HTTP API 对本地图像执行与在线检测一致的推理流水线。
-- **统一结果管理**：保存原图、骨架图、缺陷可视化结果及结构化检测数据。
-- **SQLite 持久化**：按运行、工件组、表面和缺陷四个层级保存检测记录。
-- **HTTP 控制接口**：提供任务启动、取消、健康检查、单图检测和相机控制接口。
-- **可配置部署**：模型目录、输出目录、数据库、GPU、Worker 数量、滑台串口和超时参数均通过配置文件管理。
-- **主从设备协同**：通过 UART 将视觉任务编排与 STM32F4 实时运动控制解耦。
+- **Automatic four-surface inspection**: stage loading, positioning, surface rotation, four-view acquisition, and group-level result aggregation.
+- **GPU detection pipeline**: accelerated processing with OpenCV CUDA, TensorRT, and custom tiled detection.
+- **Multi-stage defect analysis**: image preprocessing, HALCON center-region extraction, YOLO detection, and SAM segmentation and measurement.
+- **Parallel inference workers**: configurable detection thread count with acquisition decoupled from inference.
+- **Single-image mode**: HTTP APIs apply the same inference pipeline to local images as online inspection.
+- **Unified result management**: original images, skeleton images, defect visualizations, and structured detection data.
+- **SQLite persistence**: inspection records organized by run, workpiece group, surface, and defect.
+- **HTTP control APIs**: task startup, cancellation, health checks, single-image detection, and camera control.
+- **Configurable deployment**: model and output directories, database, GPU, worker count, stage serial port, and timeouts are managed through configuration.
+- **Host-device coordination**: UART decouples vision task orchestration from STM32F4 real-time motion control.
 
-## 系统架构
+## System Architecture
 
 ```mermaid
 flowchart LR
@@ -125,9 +125,9 @@ flowchart LR
     Server --> Single
 ```
 
-## 检测流程
+## Inspection Workflow
 
-一次完整的四面检测任务由上位机视觉服务和 STM32 控制器协同完成：
+A complete four-surface inspection task is coordinated by the host vision service and STM32 controller:
 
 ```mermaid
 sequenceDiagram
@@ -174,7 +174,7 @@ sequenceDiagram
     CAM->>MCU: UNLOAD / next cycle
 ```
 
-### 单帧检测流水线
+### Single-Frame Detection Pipeline
 
 ```text
 Input Image
@@ -207,45 +207,45 @@ Geometry Measurement
 SingleImageResult
 ```
 
-## 技术栈
+## Technology Stack
 
-| 组件 | 用途 |
+| Component | Purpose |
 | --- | --- |
-| C++20 | 服务主体、并发调度与算法编排 |
-| OpenCV CUDA | GPU 图像上传、裁剪、预处理与图像操作 |
-| TensorRT | YOLO 与 SAM 推理引擎 |
-| HALCON | 候选区域 / 中心区域提取 |
-| SAM | 缺陷区域分割与几何测量 |
-| libevent | HTTP 服务与接口路由 |
-| SQLite | 检测结果持久化 |
-| ConcurrentQueue | 原始图像和结果队列 |
-| MPHdc SDK | 工业相机控制与图像采集 |
-| Serial / UART | 上位机与 STM32 控制器通信 |
-| STM32F4 / MCUcode | 多轴运动、工位流程与执行机构控制 |
+| C++20 | Core service, concurrent scheduling, and algorithm orchestration |
+| OpenCV CUDA | GPU image upload, cropping, preprocessing, and image operations |
+| TensorRT | YOLO and SAM inference engines |
+| HALCON | Candidate-region / center-region extraction |
+| SAM | Defect segmentation and geometric measurement |
+| libevent | HTTP service and API routing |
+| SQLite | Inspection result persistence |
+| ConcurrentQueue | Raw-image and result queues |
+| MPHdc SDK | Industrial-camera control and image acquisition |
+| Serial / UART | Host-to-STM32 controller communication |
+| STM32F4 / MCUcode | Multi-axis motion, workcell sequencing, and actuator control |
 
-## 模块划分
+## Modules
 
-| 模块 | 主要职责 |
+| Module | Main Responsibilities |
 | --- | --- |
-| `main.cpp` | 程序入口、CLI、配置、数据库初始化、run_id |
-| `Config` | 加载部署配置与路径解析 |
-| `Server` | HTTP 路由、响应和应用服务入口 |
-| `Core/http/*` | HTTP 参数解析、检测参数映射和校验 |
-| `Scheduler` | 多面检测任务的生命周期编排 |
-| `CameraThread` | 相机采集以及与设备运动流程的协同 |
-| `SlideSerialClient` | PC 侧 UART transport，与 MCUcode UART1 通信 |
-| `QueueManager` | 原始图像与检测结果的线程安全传递 |
-| `DetectThread` | 多面检测 Worker |
-| `SingleDetectThread` | 单图检测任务 Worker |
-| `DetectionPipeline` | 单帧完整检测流水线 |
-| `GroupManager` | 四面检测结果聚合与超时管理 |
-| `InspectionRepository` | 检测结果的数据库事务持久化 |
-| `Core/detect/*` | 图像预处理、HALCON、切片、YOLO、SAM、TensorRT |
-| [`MCUcode`](https://github.com/CoisiniYv/MCUcode) | STM32F4 多轴运动、标定、工位流程、ERG/Modbus 与 UART1 协议 |
+| `main.cpp` | Entry point, CLI, configuration, database initialization, and run_id |
+| `Config` | Deployment configuration loading and path resolution |
+| `Server` | HTTP routing, responses, and application service entry points |
+| `Core/http/*` | HTTP parameter parsing, detection parameter mapping, and validation |
+| `Scheduler` | Multi-surface inspection task lifecycle orchestration |
+| `CameraThread` | Camera acquisition and coordination with device motion |
+| `SlideSerialClient` | PC-side UART transport to MCUcode UART1 |
+| `QueueManager` | Thread-safe transfer of raw images and detection results |
+| `DetectThread` | Multi-surface detection worker |
+| `SingleDetectThread` | Single-image detection worker |
+| `DetectionPipeline` | Complete single-frame detection pipeline |
+| `GroupManager` | Four-surface result aggregation and timeout management |
+| `InspectionRepository` | Transactional database persistence of inspection results |
+| `Core/detect/*` | Preprocessing, HALCON, tiling, YOLO, SAM, and TensorRT |
+| [`MCUcode`](https://github.com/CoisiniYv/MCUcode) | STM32F4 multi-axis motion, calibration, workcell sequencing, ERG/Modbus, and UART1 protocol |
 
-详细的模块边界和依赖规则见 [`docs/MODULE_RESPONSIBILITIES.md`](docs/MODULE_RESPONSIBILITIES.md)。
+See [`docs/MODULE_RESPONSIBILITIES.md`](docs/MODULE_RESPONSIBILITIES.md) for detailed module boundaries and dependency rules.
 
-## 项目结构
+## Repository Structure
 
 ```text
 .
@@ -292,11 +292,11 @@ SingleImageResult
 └── mt.vcxproj
 ```
 
-配套嵌入式固件位于独立仓库 [`CoisiniYv/MCUcode`](https://github.com/CoisiniYv/MCUcode)，不作为本仓库的 Git submodule 引入，以保持上位机与固件可以独立构建、发布和版本管理。
+The companion embedded firmware is maintained in the separate [`CoisiniYv/MCUcode`](https://github.com/CoisiniYv/MCUcode) repository. It is not included as a Git submodule, allowing the host and firmware to be built, released, and versioned independently.
 
-## 运行环境
+## Runtime Environment
 
-推荐环境：
+Recommended environment:
 
 ```text
 OS              Windows 10 / 11 x64
@@ -313,18 +313,18 @@ Controller      STM32F4 running MCUcode (full automatic system)
 Host-MCU Link   UART 115200 8N1
 ```
 
-工程中的第三方依赖根目录通过 MSBuild property 配置：
+Third-party dependency roots are configured through MSBuild properties:
 
 ```text
 ThirdPartyRoot
 TensorRTRoot
 ```
 
-其中 `TensorRTRoot` 也可以通过环境变量 `TENSORRT_ROOT` 提供。
+`TensorRTRoot` can also be supplied through the `TENSORRT_ROOT` environment variable.
 
-## 配置
+## Configuration
 
-默认配置文件为 `config.json`：
+The default configuration file is `config.json`:
 
 ```json
 {
@@ -343,25 +343,25 @@ TensorRTRoot
 }
 ```
 
-所有相对路径均以 **配置文件所在目录** 为基准解析。
+All relative paths are resolved against **the directory containing the configuration file**.
 
-| 配置项 | 说明 |
+| Option | Description |
 | --- | --- |
-| `host` | HTTP 服务监听地址 |
-| `analyzerPort` | HTTP 服务端口 |
-| `modelDir` | 模型根目录 |
-| `uploadDir` | 检测图片及可视化结果目录 |
-| `dbPath` | SQLite 数据库路径 |
+| `host` | HTTP bind address |
+| `analyzerPort` | HTTP port |
+| `modelDir` | Model root directory |
+| `uploadDir` | Inspection image and visualization output directory |
+| `dbPath` | SQLite database path |
 | `gpuDevice` | CUDA device index |
-| `detectThreads` | 多面检测 Worker 数量 |
-| `groupTimeoutMs` | 四面结果聚合超时 |
-| `slidePort` | 连接 MCUcode 控制器的串口，例如 `COM11`；留空可禁用 |
-| `slideAxisId` | 滑台轴 ID |
-| `slideTimeoutMs` | 上位机等待 MCU 流程 / 运动响应的超时 |
+| `detectThreads` | Number of multi-surface detection workers |
+| `groupTimeoutMs` | Timeout for aggregating four-surface results |
+| `slidePort` | Serial port connected to the MCUcode controller, e.g. `COM11`; leave empty to disable |
+| `slideAxisId` | Linear-stage axis ID |
+| `slideTimeoutMs` | Host timeout for MCU flow / motion responses |
 
-## 模型目录
+## Model Directory
 
-推荐目录结构：
+Recommended layout:
 
 ```text
 models/
@@ -373,59 +373,59 @@ models/
     └── SAM_mask_decoder.onnx
 ```
 
-检测请求中的相对模型路径会基于 `modelDir` 解析。
+Relative model paths in detection requests are resolved against `modelDir`.
 
-SAM 优先使用 TensorRT engine；对应 engine 不存在时，可以回退到配置的 ONNX 模型路径进行初始化。
+SAM prefers TensorRT engines. If the corresponding engine is unavailable, initialization can fall back to the configured ONNX model path.
 
-## 启动服务
+## Start the Service
 
 ```powershell
 mt.exe -f config.json
 ```
 
-查看命令行帮助：
+Display command-line help:
 
 ```powershell
 mt.exe --help
 ```
 
-服务启动后默认监听：
+The service listens at the following address by default:
 
 ```text
 http://127.0.0.1:9003
 ```
 
-实际地址由 `host` 和 `analyzerPort` 决定。
+The actual address is determined by `host` and `analyzerPort`.
 
-完整自动检测模式下，还需要：
+Full automatic inspection also requires:
 
-1. 将 [`MCUcode`](https://github.com/CoisiniYv/MCUcode) 固件集成并烧录到目标 STM32F4 控制器；
-2. 通过 UART 将 Windows 主机与控制器连接；
-3. 将对应串口写入 `config.json` 的 `slidePort`；
-4. 完成设备运动、相机位置与工位流程标定后再启动自动检测任务。
+1. Integrate and flash the [`MCUcode`](https://github.com/CoisiniYv/MCUcode) firmware onto the target STM32F4 controller.
+2. Connect the Windows host and controller through UART.
+3. Set the corresponding serial port in the `slidePort` field of `config.json`.
+4. Calibrate motion, camera positions, and workcell sequencing before starting automatic inspection.
 
-只使用单图检测接口时不要求 MCU 控制器在线。
+The MCU controller does not need to be online when using only the single-image detection API.
 
 ## HTTP API
 
-| Method | Endpoint | 功能 |
+| Method | Endpoint | Function |
 | --- | --- | --- |
-| `GET` | `/api/health` | 服务、Queue 和任务状态 |
-| `POST` | `/api/control/add` | 启动多面检测任务 |
-| `GET` | `/api/control/cancel` | 停止当前检测任务 |
-| `POST` | `/api/single_detect/add` | 执行单图检测 |
-| `GET` | `/api/single_detect/cancel` | 停止单图 Worker |
-| `GET` | `/api/camera/single_capture` | 相机单次采图 |
-| `GET` | `/api/camera/status` | 查询相机状态 |
-| `GET` | `/api/camera/stop` | 停止独立相机 Worker |
+| `GET` | `/api/health` | Service, queue, and task status |
+| `POST` | `/api/control/add` | Start a multi-surface inspection task |
+| `GET` | `/api/control/cancel` | Stop the current inspection task |
+| `POST` | `/api/single_detect/add` | Run single-image detection |
+| `GET` | `/api/single_detect/cancel` | Stop the single-image worker |
+| `GET` | `/api/camera/single_capture` | Capture a single camera image |
+| `GET` | `/api/camera/status` | Query camera status |
+| `GET` | `/api/camera/stop` | Stop the standalone camera worker |
 
-完整请求参数和示例见 [`docs/api.md`](docs/api.md)。
+See [`docs/api.md`](docs/api.md) for complete request parameters and examples.
 
-`pytesttool/` 提供用于接口联调和冒烟测试的 Python 工具。
+`pytesttool/` provides Python utilities for API integration and smoke testing.
 
-## 输出目录
+## Output Directory
 
-检测结果按程序运行和工件组组织：
+Inspection results are organized by application run and workpiece group:
 
 ```text
 output/
@@ -438,11 +438,11 @@ output/
         └── ...
 ```
 
-实际文件名由具体检测阶段决定。
+Actual filenames depend on the detection stage.
 
-## 数据模型
+## Data Model
 
-SQLite 中主要包含以下业务表：
+SQLite contains the following main tables:
 
 ```text
 inspection_runs
@@ -456,31 +456,31 @@ inspection_runs
 
 ### `inspection_runs`
 
-记录一次程序运行及其 `run_id`。
+Records an application run and its `run_id`.
 
 ### `inspection_groups`
 
-记录一个完整圆柱工件的四面检测结果及 GOOD / NG 状态。
+Records four-surface inspection results and GOOD / NG status for a complete cylindrical workpiece.
 
 ### `inspection_faces`
 
-记录每一个检测面的原图、骨架图和可视化结果路径。
+Records the original, skeleton, and visualization image paths for each inspected surface.
 
 ### `defect_detections`
 
-记录单个缺陷的：
+Records the following attributes for each defect:
 
-- 类别；
-- 置信度；
+- Class;
+- Confidence;
 - bounding box；
-- 面积；
-- 长度 / 直径等测量值。
+- Area;
+- Measurements such as length / diameter.
 
-数据库写入由 `InspectionRepository` 统一管理，并以事务方式提交组、表面和缺陷记录。
+`InspectionRepository` manages database writes centrally and commits group, surface, and defect records transactionally.
 
-## 并发与启动策略
+## Concurrency and Startup Strategy
 
-为避免硬件已经开始采集而推理模型尚未就绪，系统采用推理优先的启动顺序：
+The system initializes inference before acquisition so hardware does not start collecting images before the models are ready:
 
 ```text
 QueueManager
@@ -492,23 +492,23 @@ QueueManager
                         -> MCUcode / STM32F4
 ```
 
-任意检测 Worker 初始化失败时，任务启动失败，不进入正式采集阶段，也不会提前触发 MCU 运动流程。
+If any detection worker fails to initialize, task startup fails. Acquisition does not begin, and MCU motion is not triggered prematurely.
 
-采集帧通过 Raw Queue 分发给多个检测 Worker，检测结果通过 Result Queue 交给 `GroupManager` 聚合；设备运动和工位切换则由上位机通过 UART 请求 MCUcode 执行。
+Captured frames are distributed to detection workers through the Raw Queue. Results pass through the Result Queue to `GroupManager` for aggregation. The host requests device motion and workcell transitions from MCUcode over UART.
 
-## 设计特点
+## Design Features
 
-### 上位机与实时控制解耦
+### Decoupled Host Processing and Real-Time Control
 
-Windows 服务负责计算密集型视觉算法和业务编排，STM32F4 负责时序敏感的运动与设备控制。两者通过明确的 UART 协议连接，使视觉算法和嵌入式控制可以分别开发、测试和升级。
+The Windows service handles compute-intensive vision algorithms and workflow orchestration, while the STM32F4 handles time-sensitive motion and device control. An explicit UART protocol allows vision and embedded control to be developed, tested, and upgraded independently.
 
-### 显式检测上下文
+### Explicit Detection Context
 
-输出目录与 `run_id` 通过 `DetectionContext` 注入检测 Worker，算法流水线不依赖 HTTP 层的全局状态。
+The output directory and `run_id` are injected into detection workers through `DetectionContext`. The algorithm pipeline does not depend on HTTP-layer global state.
 
-### 统一检测流水线
+### Shared Detection Pipeline
 
-多面检测和单图检测共同使用 `DetectionPipeline`：
+Multi-surface and single-image detection share `DetectionPipeline`:
 
 ```text
 DetectThread -------+
@@ -516,9 +516,9 @@ DetectThread -------+
 SingleDetectThread -+
 ```
 
-避免两套检测逻辑长期分叉。
+This keeps the two detection paths from diverging over time.
 
-### 分层持久化
+### Layered Persistence
 
 ```text
 Scheduler
@@ -527,32 +527,32 @@ Scheduler
             -> SQLiteHelper
 ```
 
-调度层不直接拼接 SQL，数据库机制与业务数据映射保持分离。
+The scheduling layer does not construct SQL directly. Database mechanisms remain separate from application data mapping.
 
 ### TensorRT Tensor Name Mapping
 
-TensorRT 封装按模型配置的 tensor name 建立输入输出映射，而不是依赖 engine 内部枚举顺序。SAM decoder 的 IoU 与 mask 输出同样按名称识别。
+The TensorRT wrapper maps inputs and outputs using configured tensor names rather than engine enumeration order. SAM decoder IoU and mask outputs are also identified by name.
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 | --- | --- |
-| [`docs/MODULE_RESPONSIBILITIES.md`](docs/MODULE_RESPONSIBILITIES.md) | 模块职责和依赖边界 |
-| [`docs/STATIC_ANALYSIS.md`](docs/STATIC_ANALYSIS.md) | 文件级静态分析记录 |
-| [`docs/CODE_AUDIT.md`](docs/CODE_AUDIT.md) | 工程审计与风险记录 |
-| [`docs/api.md`](docs/api.md) | HTTP API 参数与示例 |
-| [`MCUcode`](https://github.com/CoisiniYv/MCUcode) | STM32F4 配套固件、UART1 协议、运动控制与设备流程 |
+| [`docs/MODULE_RESPONSIBILITIES.md`](docs/MODULE_RESPONSIBILITIES.md) | Module responsibilities and dependency boundaries |
+| [`docs/STATIC_ANALYSIS.md`](docs/STATIC_ANALYSIS.md) | File-level static analysis records |
+| [`docs/CODE_AUDIT.md`](docs/CODE_AUDIT.md) | Engineering audit and risk records |
+| [`docs/api.md`](docs/api.md) | HTTP API parameters and examples |
+| [`MCUcode`](https://github.com/CoisiniYv/MCUcode) | Companion STM32F4 firmware, UART1 protocol, motion control, and device workflows |
 
-MCU 侧 UART 协议和固件行为说明见 [`MCUcode/docs/uart1_firmware_alignment.md`](https://github.com/CoisiniYv/MCUcode/blob/master/docs/uart1_firmware_alignment.md)。
+See [`MCUcode/docs/uart1_firmware_alignment.md`](https://github.com/CoisiniYv/MCUcode/blob/master/docs/uart1_firmware_alignment.md) for the MCU-side UART protocol and firmware behavior.
 
 ## License & Third-Party Software
 
-本仓库源码的授权范围见 [`LICENSE`](LICENSE)。除单独声明的文件外，本项目源码默认保留全部权利；公开仓库本身不代表授予复制、修改、再分发、商业使用或再许可的权利。
+The licensing scope of this repository's source code is defined in [`LICENSE`](LICENSE). Unless a file states otherwise, all rights are reserved. Public availability of the repository does not grant rights to copy, modify, redistribute, use commercially, or sublicense the source code.
 
-本项目依赖多个具有独立许可条款的第三方组件。第三方软件、SDK、驱动、模型和二进制文件不属于本项目源码许可的授权范围，使用者应根据实际部署环境自行取得相应授权并遵守其许可协议。
+This project depends on third-party components with independent license terms. Third-party software, SDKs, drivers, models, and binaries are outside the scope of this project's source-code license. Users must obtain the appropriate authorizations for their deployment environment and comply with the respective license agreements.
 
-其中 **MVTec HALCON 为商业软件**。构建、开发或部署包含 HALCON 的功能时，需要由使用者向 MVTec 或其授权渠道取得与使用场景相匹配的有效 HALCON 许可证。本仓库不提供 HALCON 软件授权、license 文件、license key，也不转授任何 HALCON 的开发或运行时使用权。
+**MVTec HALCON is commercial software**. Building, developing, or deploying HALCON-based features requires a valid HALCON license appropriate to the intended use, obtained from MVTec or an authorized channel. This repository does not provide HALCON licenses, license files, or license keys, and does not grant HALCON development or runtime rights.
 
-同样，本仓库不会因为源代码公开而自动授予 NVIDIA CUDA / TensorRT、工业相机 SDK、设备驱动或其他第三方组件的再分发与商业使用权。相关组件仍分别受其原始许可协议约束。
+Publishing this source code also does not grant redistribution or commercial-use rights for NVIDIA CUDA / TensorRT, industrial-camera SDKs, device drivers, or other third-party components. Each remains subject to its original license agreement.
 
-本仓库不包含任何商业软件许可证密钥，亦不应提交此类凭据。有关 HALCON 的许可类型、开发许可和运行时许可，请参阅 [MVTec HALCON Licensing](https://www.mvtec.com/products/halcon/editions-licensing/get-a-license)。
+This repository contains no commercial software license keys, and such credentials must not be committed. For HALCON license types, development licenses, and runtime licenses, see [MVTec HALCON Licensing](https://www.mvtec.com/products/halcon/editions-licensing/get-a-license).
